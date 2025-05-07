@@ -1,10 +1,31 @@
 [project]
 name = "sg-mcp"
 version = "0.1.0"
-description = "Add your description here"
+description = "AST-based code search MCP server using ast-grep"
+authors = [{name = "Your Name", email = "your.email@example.com"}]
 readme = "README.md"
 requires-python = ">=3.13"
+
 dependencies = [
-    "pydantic>=2.11.0",
-    "mcp[cli]>=1.6.0",
+    "pydantic==2.11.1",
+    "pydantic-core==2.33.0",
+    "fastmcp",
+    "anyio==4.9.0",
+    "httpx==0.28.1",
+    "httpx-sse==0.4.0",
+    "pydantic-settings==2.8.1",
+    "python-dotenv==1.1.0",
+    "starlette==0.46.1",
+    "uvicorn==0.34.0",
+    "pyyaml",
 ]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+include = ["main.py"]
+
+[project.scripts]
+sg-mcp = "main:mcp.run"
