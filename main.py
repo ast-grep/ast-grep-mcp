@@ -15,6 +15,8 @@ import yaml as pyyaml # Import pyyaml for create_new_rule
 mcp = FastMCP("ast-grep")
 
 RULES_DIR = "sg_rules"  # Define a standard directory for rules
+MOCK_TEST_CASES_DIR = "mock_test_cases"
+MOCK_GLOBAL_RULES_DIR = "mock_global_rules"
 
 # Helper function to ensure rules directory exists
 def ensure_rules_dir(project_folder: str) -> pathlib.Path:
@@ -31,10 +33,43 @@ def ensure_rules_dir(project_folder: str) -> pathlib.Path:
         raise RuntimeError(f"Could not create rules directory '{rules_path}': {e}")
     return rules_path
 
+# Helper function to ensure mock directories exist and create them with example files if not
+def ensure_mock_dir(base_path: pathlib.Path, dir_name: str, example_files: Dict[str, str]) -> pathlib.Path:
+    mock_dir_path = base_path / dir_name
+    try:
+        mock_dir_path.mkdir(parents=True, exist_ok=True)
+        for file_name, content in example_files.items():
+            file_path = mock_dir_path / file_name
+            if not file_path.exists():
+                with open(file_path, "w") as f:
+                    f.write(content)
+    except OSError as e:
+        # Non-critical, log or handle as warning if necessary
+        print(f"Warning: Could not create/populate mock directory '{mock_dir_path}': {e}")
+    return mock_dir_path
+
+# Ensure mock directories are set up on server start (using a placeholder base like current dir)
+# In a real scenario, this base_path might be configurable or a fixed location.
+_startup_base_path = pathlib.Path(".")
+ensure_mock_dir(
+    _startup_base_path,
+    MOCK_GLOBAL_RULES_DIR,
+    {"example-global-rule.yml": "kind: Denton\\nselector: pattern\nrule:\n  pattern: print($A)"}
+)
+ensure_mock_dir(
+    _startup_base_path,
+    MOCK_TEST_CASES_DIR,
+    {
+        "example-test.py": "print('hello world')",
+        "example-test.js": "console.log('hello world');"
+    }
+)
+
 # --- Tool Implementation (Decorators likely remain the same) --- #
 
 @mcp.tool()
 def find_code(
+    ctx: Context,
     project_folder: str = Field(description="The path to the project folder"),
     pattern: str = Field(description="The ast-grep pattern to search for. Note the pattern must has valid AST structure."),
     language: str = Field(description="The language of the query", default=""),
@@ -48,6 +83,7 @@ def find_code(
 
 @mcp.tool()
 def find_code_by_rule(
+    ctx: Context,
     project_folder: str = Field(description="The path to the project folder"),
     yaml: str = Field(description="The ast-grep YAML rule to search. It must have id, language, rule fields."),
     ) -> List[dict[str, Any]]:
@@ -107,19 +143,19 @@ def run_ast_grep_yaml(yaml: str, project_folder: str) -> List[dict[str, Any]]:
 
 
 @mcp.tool()
-def get_supported_languages() -> List[str]:
+def get_supported_languages(ctx: Context) -> List[str]:
     """Returns supported languages list"""
     args = ["ast-grep", "language", "--list"]
     return handle_subprocess(args, list_processor)
 
 @mcp.tool()
-def get_language_kinds(language: str) -> List[str]:
+def get_language_kinds(ctx: Context, language: str) -> List[str]:
     """Returns AST node kinds for a language"""
     args = ["ast-grep", "language", "--kinds", language]
     return handle_subprocess(args, list_processor)
 
 @mcp.tool()
-def dump_ast(code: str, language: str) -> Dict[str, Any]:
+def dump_ast(ctx: Context, code: str, language: str) -> Dict[str, Any]:
     """Dumps AST structure of code"""
     # Ensure language is alphanumeric for file extension safety
     safe_lang = ''.join(filter(str.isalnum, language)) or 'txt'
@@ -134,7 +170,7 @@ def dump_ast(code: str, language: str) -> Dict[str, Any]:
         return handle_subprocess(args, json_processor, cleanup=None)
 
 @mcp.tool()
-def validate_rule_syntax(rule: str) -> Dict[str, Any]:
+def validate_rule_syntax(ctx: Context, rule: str) -> Dict[str, Any]:
     """Validates YAML rule syntax"""
     with tempfile.NamedTemporaryFile(mode='w', suffix='.yml', delete=True) as f:
         f.write(rule)
@@ -145,7 +181,7 @@ def validate_rule_syntax(rule: str) -> Dict[str, Any]:
         return handle_subprocess(args, validation_processor, cleanup=None)
 
 @mcp.tool()
-def list_rules(project_folder: str = Field(description="The path to the project folder")) -> List[str]:
+def list_rules(ctx: Context, project_folder: str = Field(description="The path to the project folder")) -> List[str]:
     """Lists YAML rule files in the project's sg_rules directory."""
     try:
         rules_path = ensure_rules_dir(project_folder)
@@ -159,7 +195,7 @@ def list_rules(project_folder: str = Field(description="The path to the project 
         raise RuntimeError(f"Error listing rules: {e}")
 
 @mcp.tool()
-def get_rule(project_folder: str = Field(description="The path to the project folder"),
+def get_rule(ctx: Context, project_folder: str = Field(description="The path to the project folder"),
              rule_name: str = Field(description="The name of the rule file (e.g., my-rule.yml)")) -> str:
     """Gets the content of a specific YAML rule file from the project's sg_rules directory."""
     try:
@@ -175,7 +211,7 @@ def get_rule(project_folder: str = Field(description="The path to the project fo
         raise RuntimeError(f"Error reading rule file '{rule_name}': {e}")
 
 @mcp.tool()
-def create_new_rule(project_folder: str = Field(description="The path to the project folder"),
+def create_new_rule(ctx: Context, project_folder: str = Field(description="The path to the project folder"),
                     rule_name: str = Field(description="The desired name for the new rule file (e.g., new-rule.yml)"),
                     rule_content: str = Field(description="The YAML content for the new rule")) -> str:
     """Creates a new YAML rule file in the project's sg_rules directory."""
@@ -205,7 +241,7 @@ def create_new_rule(project_folder: str = Field(description="The path to the pro
 
 
 @mcp.tool()
-def list_all_diagnostics_in_the_workspace(project_folder: str = Field(description="The path to the project folder")) -> Union[List[dict[str, Any]], str]:
+def list_all_diagnostics_in_the_workspace(ctx: Context, project_folder: str = Field(description="The path to the project folder")) -> Union[List[dict[str, Any]], str]:
     """Runs 'sg scan --json' to find diagnostics based on rules in sg_rules directory."""
     try:
         rules_path = ensure_rules_dir(project_folder)
@@ -224,30 +260,34 @@ def list_all_diagnostics_in_the_workspace(project_folder: str = Field(descriptio
 
 # Resource to list local rules
 @mcp.resource("rule://sg_rules")
-async def list_local_rules_resource(project_folder: str) -> List[Dict[str, str]]:
-    """Lists local rule files as resources. Requires project_folder."""
+async def list_local_rules_resource(ctx: Context) -> List[Dict[str, Any]]:
+    """Dynamically lists rule files under sg_rules for a given project_folder."""
+    project_folder = ctx.params.get("project_folder")
     if not project_folder:
-         raise ValueError("Listing local rules requires the 'project_folder' argument.")
+        # Default to current directory or raise an error if project_folder is essential
+        # raise ValueError("project_folder parameter is required to list local rules.")
+        project_folder = "." # Or some sensible default, or make it mandatory via client
+        # Consider if this resource should even be listed by list_mcp_resources if project_folder isn't known then.
+
     try:
-        rules_path = ensure_rules_dir(project_folder)
-        rule_files = list(rules_path.glob('*.yml')) + list(rules_path.glob('*.yaml'))
-        return [
-            {
-                "uri": f"rule://sg_rules/{rule_file.name}",
-                "name": f"Rule: {rule_file.name}",
-                # Add other resource metadata if needed by fastmcp resource model
-            }
-            for rule_file in rule_files
-        ]
-    except (ValueError, RuntimeError) as e:
-        raise e
+        rules_p = ensure_rules_dir(project_folder)
+        rule_files_info = []
+        for p in rules_p.glob("*.yml"):
+            rule_files_info.append({"uri": f"rule://sg_rules/{p.name}", "name": p.name, "description": "A local ast-grep rule."})
+        for p in rules_p.glob("*.yaml"):
+            rule_files_info.append({"uri": f"rule://sg_rules/{p.name}", "name": p.name, "description": "A local ast-grep rule."})
+        return rule_files_info
+    except ValueError as ve: # Catch specific error from ensure_rules_dir
+        raise ValueError(f"Cannot list rules: {ve}") # Re-raise to be sent as error response
     except Exception as e:
-        raise RuntimeError(f"Error listing local rules resource: {e}")
+        # Generic error for other issues
+        raise RuntimeError(f"Error accessing rules in '{project_folder}': {e}")
 
 # Template Resource to read a specific local rule
 @mcp.resource("rule://sg_rules/{rule_name}")
-async def read_local_rule_resource(rule_name: str, project_folder: str) -> Dict[str, Any]:
+async def read_local_rule_resource(ctx: Context, rule_name: str) -> str:
     """Reads a specific local rule file. Requires project_folder."""
+    project_folder = ctx.params.get("project_folder")
     if not project_folder:
          raise ValueError("Reading local rules requires the 'project_folder' argument.")
     try:
@@ -263,11 +303,7 @@ async def read_local_rule_resource(rule_name: str, project_folder: str) -> Dict[
 
         with open(rule_file_path, 'r') as f:
             content = f.read()
-        return {
-            "uri": f"rule://sg_rules/{rule_name}",
-            "mimeType": "application/yaml",
-            "content": content # fastmcp might expect 'content' instead of 'text'
-        }
+        return content # Return only the content string
     except (ValueError, RuntimeError, FileNotFoundError) as e:
         raise e
     except Exception as e:
@@ -275,33 +311,22 @@ async def read_local_rule_resource(rule_name: str, project_folder: str) -> Dict[
 
 # Static Resource for mock global rule
 @mcp.resource("rule://global/example-global-rule.yml")
-def global_rule_resource() -> Dict[str, Any]:
+def global_rule_resource() -> str:
      """Provides mock content for the global rule example."""
-     return {
-         "uri": "rule://global/example-global-rule.yml",
-         "mimeType": "application/yaml",
-         "content": "# Mock Global Rule Content\nlanguage: python\nrule:\n  pattern: print($ARG)"
-     }
+     # In a real scenario, this might load from a file or predefined string
+     return "# Mock Global Rule Content\nlanguage: python\nrule:\n  pattern: print($ARG)"
 
 # Static Resource for mock python test case
 @mcp.resource("testcase://python/example-test.py")
-def python_test_case_resource() -> Dict[str, Any]:
+def python_test_case_resource() -> str:
     """Provides mock content for the python test case example."""
-    return {
-        "uri": "testcase://python/example-test.py",
-        "mimeType": "text/x-python",
-        "content": "# Mock Python Test Case\nimport os\n\nprint(\"Hello, world!\")\n\ndef old_function(x):\n    return x * 2"
-    }
+    return "# Mock Python Test Case\nimport os\n\nprint(\"Hello, world!\")\n\ndef old_function(x):\n    return x * 2"
 
 # Static Resource for mock javascript test case
 @mcp.resource("testcase://javascript/example-test.js")
-def javascript_test_case_resource() -> Dict[str, Any]:
+def javascript_test_case_resource() -> str:
     """Provides mock content for the javascript test case example."""
-    return {
-        "uri": "testcase://javascript/example-test.js",
-        "mimeType": "text/javascript",
-        "content": "// Mock JavaScript Test Case\nconsole.log(\"Hello, world!\");\n\nfunction deprecatedFunc(a) {\n  return a + 1;\n}"
-    }
+    return "// Mock JavaScript Test Case\nconsole.log(\"Hello, world!\");\n\nfunction deprecatedFunc(a) {\n  return a + 1;\n}"
 
 # --- Subprocess Result Processors (Refined error propagation) --- #
 
@@ -369,5 +394,33 @@ def handle_subprocess(args, processor, cleanup=None):
 # --- Main Execution --- #
 
 if __name__ == "__main__":
-    # No need to check for pyyaml import here if it's in pyproject.toml
+    print("--- Server Starting ---")
+    print("Registered Tools (from mcp.router._tools):")
+    if hasattr(mcp, 'router') and hasattr(mcp.router, '_tools') and mcp.router._tools:
+        for tool_name, tool_def in mcp.router._tools.items():
+            # tool_def is likely a ToolDefinition object
+            # Accessing description directly might work, or via a method/property
+            description = getattr(tool_def, 'description', tool_def.function.__doc__ if hasattr(tool_def, 'function') else 'No description')
+            print(f"  - {tool_name}: {description}")
+    else:
+        print("  No tools found in mcp.router._tools or router not available.")
+    
+    print("Registered Static Resources (from mcp.router._resources):")
+    if hasattr(mcp, 'router') and hasattr(mcp.router, '_resources') and mcp.router._resources:
+        for uri, resource_obj in mcp.router._resources.items(): 
+            # resource_obj could be a StaticResource or similar
+            name = getattr(resource_obj, 'name', 'N/A')
+            print(f"  - URI: {uri}, Name: {name}")
+    else:
+        print("  No static resources found in mcp.router._resources or router not available.")
+
+    print("Registered Resource Templates (from mcp.router._resource_templates):")
+    if hasattr(mcp, 'router') and hasattr(mcp.router, '_resource_templates') and mcp.router._resource_templates:
+        for uri_template, template_obj in mcp.router._resource_templates.items():
+            name = getattr(template_obj, 'name', 'N/A')
+            print(f"  - Template URI: {uri_template}, Name: {name}")
+    else:
+        print("  No resource templates found in mcp.router._resource_templates or router not available.")
+
+    print("-----------------------")
     mcp.run(transport = "stdio")
