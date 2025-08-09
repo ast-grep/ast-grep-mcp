@@ -7,6 +7,7 @@ from enum import Enum
 import argparse
 import os
 import sys
+import yaml
 
 # Determine how the script was invoked
 if sys.argv[0].endswith('main.py'):
@@ -76,6 +77,56 @@ def dump_syntax_tree(
     """
     return run_ast_grep_dump(code, language, format.value)
 
+@mcp.tool()
+def get_supported_languages() -> List[str]:
+    """
+    Get list of languages supported.
+
+    Returns common language identifiers that can be used in the 'language' parameter of other tools.
+    """
+    base_languages = [  # https://ast-grep.github.io/reference/languages.html
+        "bash",
+        "c",
+        "cpp",
+        "csharp",
+        "css",
+        "elixir",
+        "go",
+        "haskell",
+        "html",
+        "java",
+        "javascript",
+        "json",
+        "jsx",
+        "kotlin",
+        "lua",
+        "nix",
+        "php",
+        "python",
+        "ruby",
+        "rust",
+        "scala",
+        "solidity",
+        "swift",
+        "tsx",
+        "typescript",
+        "yaml"
+    ]
+
+    # Check for custom languages in config file
+    # https://ast-grep.github.io/advanced/custom-language.html#register-language-in-sgconfig-yml
+    if CONFIG_PATH and os.path.exists(CONFIG_PATH):
+        try:
+            import yaml
+            with open(CONFIG_PATH, 'r') as f:
+                config = yaml.safe_load(f)
+                if config and 'customLanguages' in config:
+                    custom_langs = list(config['customLanguages'].keys())
+                    return sorted(set(base_languages + custom_langs))
+        except Exception:
+            pass
+
+    return base_languages
 
 @mcp.tool()
 def test_match_code_rule(
