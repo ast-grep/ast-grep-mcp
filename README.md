@@ -216,6 +216,10 @@ ast-grep supports many programming languages including:
 - C#
 - And many more...
 
+For a complete list of built-in supported languages, see the [ast-grep language support documentation](https://ast-grep.github.io/reference/languages.html).
+
+You can also add support for custom languages through the `sgconfig.yaml` configuration file. See the [custom language guide](https://ast-grep.github.io/guide/project/project-config.html#languagecustomlanguage) for details.
+
 ## Troubleshooting
 
 ### Common Issues
