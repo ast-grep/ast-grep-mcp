@@ -18,11 +18,14 @@ class MockFastMCP:
 
     def __init__(self, name):
         self.name = name
+        self.tools = {}  # Store registered tools
 
     def tool(self, **kwargs):
         """Decorator that returns the function unchanged"""
 
         def decorator(func):
+            # Store the function for later retrieval
+            self.tools[func.__name__] = func
             return func  # Return original function without modification
 
         return decorator
@@ -40,17 +43,21 @@ def mock_field(**kwargs):
 # Patch the imports before loading main
 with patch("mcp.server.fastmcp.FastMCP", MockFastMCP):
     with patch("pydantic.Field", mock_field):
+        import main
         from main import (
-            dump_syntax_tree,
-            find_code,
-            find_code_by_rule,
             format_matches_as_text,
             run_ast_grep,
             run_command,
         )
 
-        # Import with different name to avoid pytest treating it as a test
-        from main import test_match_code_rule as match_code_rule
+        # Call register_mcp_tools to define the tool functions
+        main.register_mcp_tools()
+
+        # Extract the tool functions from the mocked mcp instance
+        dump_syntax_tree = main.mcp.tools.get("dump_syntax_tree")
+        find_code = main.mcp.tools.get("find_code")
+        find_code_by_rule = main.mcp.tools.get("find_code_by_rule")
+        match_code_rule = main.mcp.tools.get("test_match_code_rule")
 
 
 class TestDumpSyntaxTree:

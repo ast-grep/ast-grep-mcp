@@ -17,11 +17,14 @@ class MockFastMCP:
 
     def __init__(self, name):
         self.name = name
+        self.tools = {}  # Store registered tools
 
     def tool(self, **kwargs):
         """Decorator that returns the function unchanged"""
 
         def decorator(func):
+            # Store the function for later retrieval
+            self.tools[func.__name__] = func
             return func  # Return original function without modification
 
         return decorator
@@ -39,7 +42,14 @@ def mock_field(**kwargs):
 # Import with mocked decorators
 with patch("mcp.server.fastmcp.FastMCP", MockFastMCP):
     with patch("pydantic.Field", mock_field):
-        from main import find_code, find_code_by_rule
+        import main
+
+        # Call register_mcp_tools to define the tool functions
+        main.register_mcp_tools()
+
+        # Extract the tool functions from the mocked mcp instance
+        find_code = main.mcp.tools.get("find_code")
+        find_code_by_rule = main.mcp.tools.get("find_code_by_rule")
 
 
 @pytest.fixture
