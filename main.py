@@ -103,7 +103,7 @@ def register_mcp_tools() -> None:
         pattern: str = Field(description = "The ast-grep pattern to search for. Note, the pattern must have valid AST structure."),
         language: str = Field(description = f"The language of the code. Supported: {', '.join(get_supported_languages())}. "
                                            "If not specified, will be auto-detected based on file extensions.", default = ""),
-        max_results: Optional[int] = Field(default = None, description = "Maximum results to return"),
+        max_results: int = Field(default = 0, description = "Maximum results to return"),
         output_format: str = Field(default = "text", description = "'text' or 'json'"),
     ) -> str | List[dict[str, Any]]:
         """
@@ -149,7 +149,7 @@ def register_mcp_tools() -> None:
 
         # Apply max_results limit to complete matches
         total_matches = len(matches)
-        if max_results is not None and total_matches > max_results:
+        if max_results and total_matches > max_results:
             matches = matches[:max_results]
 
         if output_format == "text":
@@ -157,7 +157,7 @@ def register_mcp_tools() -> None:
                 return "No matches found"
             text_output = format_matches_as_text(matches)
             header = f"Found {len(matches)} matches"
-            if max_results is not None and total_matches > max_results:
+            if max_results and total_matches > max_results:
                 header += f" (showing first {max_results} of {total_matches})"
             return header + ":\n\n" + text_output
         return matches  # type: ignore[no-any-return]
@@ -166,7 +166,7 @@ def register_mcp_tools() -> None:
     def find_code_by_rule(
         project_folder: str = Field(description = "The absolute path to the project folder. It must be absolute path."),
         yaml: str = Field(description = "The ast-grep YAML rule to search. It must have id, language, rule fields."),
-        max_results: Optional[int] = Field(default = None, description = "Maximum results to return"),
+        max_results: int = Field(default = 0, description = "Maximum results to return"),
         output_format: str = Field(default = "text", description = "'text' or 'json'"),
         ) -> str | List[dict[str, Any]]:
         """
@@ -212,7 +212,7 @@ def register_mcp_tools() -> None:
 
         # Apply max_results limit to complete matches
         total_matches = len(matches)
-        if max_results is not None and total_matches > max_results:
+        if max_results and total_matches > max_results:
             matches = matches[:max_results]
 
         if output_format == "text":
@@ -220,7 +220,7 @@ def register_mcp_tools() -> None:
                 return "No matches found"
             text_output = format_matches_as_text(matches)
             header = f"Found {len(matches)} matches"
-            if max_results is not None and total_matches > max_results:
+            if max_results and total_matches > max_results:
                 header += f" (showing first {max_results} of {total_matches})"
             return header + ":\n\n" + text_output
         return matches  # type: ignore[no-any-return]
