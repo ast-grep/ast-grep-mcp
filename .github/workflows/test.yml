@@ -4,7 +4,7 @@ name: Tests
 on:  # https://docs.github.com/en/actions/reference/events-that-trigger-workflows
   push:
     branches:
-    - '**'
+    - main
     tags-ignore:  # don't build tags
     - '**'
     paths-ignore:
