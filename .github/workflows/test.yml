@@ -22,6 +22,8 @@ defaults:
 jobs:
   test:
     runs-on: ["self-hosted", "linux", "x64"]
+    env:
+      UV_PYTHON: "3.12"
 
     steps:
     - name: Git Checkout
@@ -33,7 +35,7 @@ jobs:
         enable-cache: true
 
     - name: Set up Python
-      run: uv python install
+      run: uv python install 3.12
 
     - name: Install ast-grep
       run: |

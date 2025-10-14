@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM ghcr.io/astral-sh/uv:python3.13-bookworm AS builder
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm AS builder
 WORKDIR /app
 
 # Install project dependencies using uv (without dev extras)
@@ -11,7 +11,7 @@ RUN uv sync --frozen --no-dev
 COPY . .
 
 # Final runtime image
-FROM python:3.13-slim
+FROM python:3.12-slim
 WORKDIR /app
 
 # Install system dependencies for ast-grep CLI
