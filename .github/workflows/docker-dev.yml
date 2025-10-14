@@ -1,0 +1,30 @@
+name: Build Dev Docker Image
+
+on:
+  push:
+    branches:
+      - '**'
+    tags-ignore:
+      - '**'
+  pull_request:
+
+jobs:
+  build-dev-image:
+    runs-on: ["self-hosted", "linux", "x64"]
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image (dev)
+        run: |
+          docker buildx build -t ghcr.io/${{ github.repository_owner }}/ast-grep-mcp:dev --load .
+
+      - name: Save Docker image archive
+        run: |
+          mkdir -p /srv/docker-images
+          docker save ghcr.io/${{ github.repository_owner }}/ast-grep-mcp:dev -o /srv/docker-images/ast-grep-mcp_dev.tar

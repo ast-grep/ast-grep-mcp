@@ -21,11 +21,7 @@ defaults:
 
 jobs:
   test:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-      fail-fast: false
+    runs-on: ["self-hosted", "linux", "x64"]
 
     steps:
     - name: Git Checkout
