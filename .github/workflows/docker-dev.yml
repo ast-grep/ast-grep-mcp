@@ -13,6 +13,9 @@ jobs:
     runs-on: ["self-hosted", "linux", "x64"]
     permissions:
       contents: read
+    env:
+      DEV_IMAGE_TAG: ghcr.io/${{ github.repository_owner }}/ast-grep-mcp:dev
+      DEV_IMAGE_ARCHIVE: ${{ runner.temp }}/ast-grep-mcp_dev.tar
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -22,9 +25,10 @@ jobs:
 
       - name: Build Docker image (dev)
         run: |
-          docker buildx build -t ghcr.io/${{ github.repository_owner }}/ast-grep-mcp:dev --load .
+          docker buildx build -t "$DEV_IMAGE_TAG" --load .
 
       - name: Save Docker image archive
         run: |
-          mkdir -p /srv/docker-images
-          docker save ghcr.io/${{ github.repository_owner }}/ast-grep-mcp:dev -o /srv/docker-images/ast-grep-mcp_dev.tar
+          mkdir -p "$(dirname "$DEV_IMAGE_ARCHIVE")"
+          docker save "$DEV_IMAGE_TAG" -o "$DEV_IMAGE_ARCHIVE"
+          echo "Saved dev image to $DEV_IMAGE_ARCHIVE"

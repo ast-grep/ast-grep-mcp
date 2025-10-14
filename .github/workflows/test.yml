@@ -37,9 +37,16 @@ jobs:
     - name: Set up Python
       run: uv python install 3.12
 
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        check-latest: true
+
     - name: Install ast-grep
       run: |
-        npm install -g @ast-grep/cli
+        npm install --global --prefix "$HOME/.local" @ast-grep/cli
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
         ast-grep --version
 
     - name: Install dependencies
