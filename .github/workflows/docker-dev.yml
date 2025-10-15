@@ -3,7 +3,7 @@ name: Build Dev Docker Image
 on:
   push:
     branches:
-      - main
+      - '**'
     tags-ignore:
       - '**'
   pull_request:
