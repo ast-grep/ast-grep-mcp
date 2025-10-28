@@ -48,6 +48,11 @@ with patch("mcp.server.fastmcp.FastMCP", MockFastMCP):
             format_matches_as_text,
             run_ast_grep,
             run_command,
+            validate_code_snippet,
+            validate_language,
+            validate_pattern,
+            validate_project_folder,
+            validate_yaml_rule,
         )
 
         # Call register_mcp_tools to define the tool functions
@@ -139,7 +144,7 @@ class TestFindCode:
     """Test the find_code function"""
 
     @patch("main.run_ast_grep")
-    def test_text_format_with_results(self, mock_run):
+    def test_text_format_with_results(self, mock_run, tmp_path):
         """Test text format output with results"""
         mock_result = Mock()
         mock_matches = [
@@ -152,7 +157,7 @@ class TestFindCode:
         mock_run.return_value = mock_result
 
         result = find_code(
-            project_folder="/test/path",
+            project_folder=str(tmp_path),
             pattern="def $NAME():",
             language="python",
             output_format="text",
@@ -164,27 +169,27 @@ class TestFindCode:
         assert "file.py:1-2" in result
         assert "file.py:5-6" in result
         mock_run.assert_called_once_with(
-            "run", ["--pattern", "def $NAME():", "--lang", "python", "--json", "/test/path"]
+            "run", ["--pattern", "def $NAME():", "--lang", "python", "--json", str(tmp_path)]
         )
 
     @patch("main.run_ast_grep")
-    def test_text_format_no_results(self, mock_run):
+    def test_text_format_no_results(self, mock_run, tmp_path):
         """Test text format output with no results"""
         mock_result = Mock()
         mock_result.stdout = "[]"
         mock_run.return_value = mock_result
 
         result = find_code(
-            project_folder="/test/path", pattern="nonexistent", output_format="text"
+            project_folder=str(tmp_path), pattern="nonexistent", output_format="text"
         )
 
         assert result == "No matches found"
         mock_run.assert_called_once_with(
-            "run", ["--pattern", "nonexistent", "--json", "/test/path"]
+            "run", ["--pattern", "nonexistent", "--json", str(tmp_path)]
         )
 
     @patch("main.run_ast_grep")
-    def test_text_format_with_max_results(self, mock_run):
+    def test_text_format_with_max_results(self, mock_run, tmp_path):
         """Test text format with max_results limit"""
         mock_result = Mock()
         mock_matches = [
@@ -197,7 +202,7 @@ class TestFindCode:
         mock_run.return_value = mock_result
 
         result = find_code(
-            project_folder="/test/path",
+            project_folder=str(tmp_path),
             pattern="pattern",
             max_results=2,
             output_format="text",
@@ -209,7 +214,7 @@ class TestFindCode:
         assert "match3" not in result
 
     @patch("main.run_ast_grep")
-    def test_json_format(self, mock_run):
+    def test_json_format(self, mock_run, tmp_path):
         """Test JSON format output"""
         mock_result = Mock()
         mock_matches = [
@@ -220,16 +225,16 @@ class TestFindCode:
         mock_run.return_value = mock_result
 
         result = find_code(
-            project_folder="/test/path", pattern="def $NAME():", output_format="json"
+            project_folder=str(tmp_path), pattern="def $NAME():", output_format="json"
         )
 
         assert result == mock_matches
         mock_run.assert_called_once_with(
-            "run", ["--pattern", "def $NAME():", "--json", "/test/path"]
+            "run", ["--pattern", "def $NAME():", "--json", str(tmp_path)]
         )
 
     @patch("main.run_ast_grep")
-    def test_json_format_with_max_results(self, mock_run):
+    def test_json_format_with_max_results(self, mock_run, tmp_path):
         """Test JSON format with max_results limit"""
         mock_result = Mock()
         mock_matches = [{"text": "match1"}, {"text": "match2"}, {"text": "match3"}]
@@ -237,7 +242,7 @@ class TestFindCode:
         mock_run.return_value = mock_result
 
         result = find_code(
-            project_folder="/test/path",
+            project_folder=str(tmp_path),
             pattern="pattern",
             max_results=2,
             output_format="json",
@@ -247,11 +252,11 @@ class TestFindCode:
         assert result[0]["text"] == "match1"
         assert result[1]["text"] == "match2"
 
-    def test_invalid_output_format(self):
+    def test_invalid_output_format(self, tmp_path):
         """Test with invalid output format"""
         with pytest.raises(ValueError, match="Invalid output_format"):
             find_code(
-                project_folder="/test/path", pattern="pattern", output_format="invalid"
+                project_folder=str(tmp_path), pattern="pattern", output_format="invalid"
             )
 
 
@@ -259,7 +264,7 @@ class TestFindCodeByRule:
     """Test the find_code_by_rule function"""
 
     @patch("main.run_ast_grep")
-    def test_text_format_with_results(self, mock_run):
+    def test_text_format_with_results(self, mock_run, tmp_path):
         """Test text format output with results"""
         mock_result = Mock()
         mock_matches = [
@@ -278,7 +283,7 @@ rule:
 """
 
         result = find_code_by_rule(
-            project_folder="/test/path", yaml=yaml_rule, output_format="text"
+            project_folder=str(tmp_path), yaml=yaml_rule, output_format="text"
         )
 
         assert "Found 2 matches:" in result
@@ -287,11 +292,11 @@ rule:
         assert "file.py:1-2" in result
         assert "file.py:10-11" in result
         mock_run.assert_called_once_with(
-            "scan", ["--inline-rules", yaml_rule, "--json", "/test/path"]
+            "scan", ["--inline-rules", yaml_rule, "--json", str(tmp_path)]
         )
 
     @patch("main.run_ast_grep")
-    def test_json_format(self, mock_run):
+    def test_json_format(self, mock_run, tmp_path):
         """Test JSON format output"""
         mock_result = Mock()
         mock_matches = [{"text": "class Foo:", "file": "test.py"}]
@@ -305,12 +310,12 @@ rule:
 """
 
         result = find_code_by_rule(
-            project_folder="/test/path", yaml=yaml_rule, output_format="json"
+            project_folder=str(tmp_path), yaml=yaml_rule, output_format="json"
         )
 
         assert result == mock_matches
         mock_run.assert_called_once_with(
-            "scan", ["--inline-rules", yaml_rule, "--json", "/test/path"]
+            "scan", ["--inline-rules", yaml_rule, "--json", str(tmp_path)]
         )
 
 
@@ -438,6 +443,154 @@ class TestRunAstGrep:
             ],
             None,
         )
+
+
+class TestValidation:
+    """Test validation helper functions"""
+
+    def test_validate_project_folder_success(self, tmp_path):
+        """Test valid project folder"""
+        result = validate_project_folder(str(tmp_path))
+        assert result == tmp_path
+
+    def test_validate_project_folder_empty(self):
+        """Test rejection of empty path"""
+        with pytest.raises(ValueError, match="cannot be empty"):
+            validate_project_folder("")
+
+    def test_validate_project_folder_relative_path(self):
+        """Test rejection of relative paths"""
+        with pytest.raises(ValueError, match="must be an absolute path"):
+            validate_project_folder("./relative/path")
+
+    def test_validate_project_folder_nonexistent(self):
+        """Test rejection of non-existent paths"""
+        with pytest.raises(ValueError, match="does not exist"):
+            validate_project_folder("/nonexistent/path/12345")
+
+    def test_validate_project_folder_file_not_directory(self, tmp_path):
+        """Test rejection of files (not directories)"""
+        file_path = tmp_path / "test.txt"
+        file_path.write_text("test")
+        with pytest.raises(ValueError, match="must be a directory"):
+            validate_project_folder(str(file_path))
+
+    def test_validate_pattern_success(self):
+        """Test valid pattern"""
+        result = validate_pattern("  def $NAME()  ")
+        assert result == "def $NAME()"
+
+    def test_validate_pattern_empty(self):
+        """Test rejection of empty patterns"""
+        with pytest.raises(ValueError, match="cannot be empty"):
+            validate_pattern("")
+
+    def test_validate_pattern_whitespace_only(self):
+        """Test rejection of whitespace-only patterns"""
+        with pytest.raises(ValueError, match="cannot be empty"):
+            validate_pattern("   ")
+
+    def test_validate_pattern_too_long(self):
+        """Test rejection of overly long patterns"""
+        long_pattern = "x" * 10001
+        with pytest.raises(ValueError, match="too long"):
+            validate_pattern(long_pattern)
+
+    def test_validate_language_success(self):
+        """Test valid language"""
+        result = validate_language("  PYTHON  ")
+        assert result == "python"
+
+    def test_validate_language_empty_allowed(self):
+        """Test empty language (auto-detection) is allowed"""
+        result = validate_language("")
+        assert result == ""
+
+    def test_validate_language_invalid(self):
+        """Test rejection of unsupported languages"""
+        with pytest.raises(ValueError, match="Unsupported language"):
+            validate_language("unsupported_lang")
+
+    def test_validate_language_invalid_with_suggestion(self):
+        """Test error message includes suggestions for similar languages"""
+        with pytest.raises(ValueError, match="Did you mean"):
+            validate_language("typ")  # Should suggest typescript, tsx
+
+    def test_validate_yaml_rule_success(self):
+        """Test valid YAML rule"""
+        yaml_str = """
+id: test-rule
+language: python
+rule:
+  pattern: 'def $NAME()'
+"""
+        result = validate_yaml_rule(yaml_str)
+        assert result["id"] == "test-rule"
+        assert result["language"] == "python"
+        assert "rule" in result
+
+    def test_validate_yaml_rule_empty(self):
+        """Test rejection of empty YAML"""
+        with pytest.raises(ValueError, match="cannot be empty"):
+            validate_yaml_rule("")
+
+    def test_validate_yaml_rule_too_long(self):
+        """Test rejection of overly long YAML"""
+        long_yaml = "x" * 50001
+        with pytest.raises(ValueError, match="too long"):
+            validate_yaml_rule(long_yaml)
+
+    def test_validate_yaml_rule_invalid_syntax(self):
+        """Test rejection of invalid YAML syntax"""
+        yaml_str = "id: test\n  invalid: [unclosed"
+        with pytest.raises(ValueError, match="Invalid YAML syntax"):
+            validate_yaml_rule(yaml_str)
+
+    def test_validate_yaml_rule_missing_id(self):
+        """Test rejection of YAML missing 'id' field"""
+        yaml_str = "language: python\nrule:\n  pattern: 'test'"
+        with pytest.raises(ValueError, match="missing required fields.*id"):
+            validate_yaml_rule(yaml_str)
+
+    def test_validate_yaml_rule_missing_language(self):
+        """Test rejection of YAML missing 'language' field"""
+        yaml_str = "id: test\nrule:\n  pattern: 'test'"
+        with pytest.raises(ValueError, match="missing required fields.*language"):
+            validate_yaml_rule(yaml_str)
+
+    def test_validate_yaml_rule_missing_rule(self):
+        """Test rejection of YAML missing 'rule' field"""
+        yaml_str = "id: test\nlanguage: python"
+        with pytest.raises(ValueError, match="missing required fields.*rule"):
+            validate_yaml_rule(yaml_str)
+
+    def test_validate_yaml_rule_not_dict(self):
+        """Test rejection of YAML that isn't a dictionary"""
+        yaml_str = "- item1\n- item2"
+        with pytest.raises(ValueError, match="must be a dictionary"):
+            validate_yaml_rule(yaml_str)
+
+    def test_validate_code_snippet_success(self):
+        """Test valid code snippet"""
+        code = "def foo():\n    pass"
+        result = validate_code_snippet(code)
+        assert result == code
+
+    def test_validate_code_snippet_empty(self):
+        """Test rejection of empty code"""
+        with pytest.raises(ValueError, match="cannot be empty"):
+            validate_code_snippet("")
+
+    def test_validate_code_snippet_whitespace_only(self):
+        """Test rejection of whitespace-only code"""
+        with pytest.raises(ValueError, match="cannot be empty"):
+            validate_code_snippet("   \n  \t  ")
+
+    def test_validate_code_snippet_too_long(self):
+        """Test rejection of overly long code"""
+        long_code = "x" * 100001
+        with pytest.raises(ValueError, match="too long"):
+            validate_code_snippet(long_code)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,8 @@ import json
 import os
 import subprocess
 import sys
-from typing import Any, List, Literal, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional, cast
 
 import yaml
 from mcp.server.fastmcp import FastMCP
@@ -11,6 +12,195 @@ from pydantic import Field
 
 # Global variable for config path (will be set by parse_args_and_get_config)
 CONFIG_PATH = None
+
+# ============================================================================
+# Input Validation Functions
+# ============================================================================
+
+
+def validate_project_folder(path: str) -> Path:
+    """
+    Validate project folder is absolute, exists, and is a directory.
+
+    Args:
+        path: Path to validate
+
+    Returns:
+        Path object if valid
+
+    Raises:
+        ValueError: With actionable error message for LLMs
+    """
+    if not path:
+        raise ValueError("project_folder cannot be empty")
+
+    if not os.path.isabs(path):
+        raise ValueError(
+            f"project_folder must be an absolute path, got: {path}\n"
+            f"Tip: Use absolute paths like '/home/user/project' or '/Users/user/project'"
+        )
+
+    path_obj = Path(path)
+    if not path_obj.exists():
+        raise ValueError(f"project_folder does not exist: {path}")
+
+    if not path_obj.is_dir():
+        raise ValueError(f"project_folder must be a directory, got file: {path}")
+
+    return path_obj
+
+
+def validate_pattern(pattern: str) -> str:
+    """
+    Validate ast-grep pattern is non-empty and within reasonable length.
+
+    Args:
+        pattern: Pattern to validate
+
+    Returns:
+        Stripped pattern if valid
+
+    Raises:
+        ValueError: With actionable error message
+    """
+    if not pattern or not pattern.strip():
+        raise ValueError(
+            "pattern cannot be empty or whitespace\n"
+            "Example patterns: 'console.log($$$)', 'def $NAME($$$)', 'class $CLASS'"
+        )
+
+    pattern = pattern.strip()
+
+    if len(pattern) > 10000:
+        raise ValueError(
+            f"pattern is too long ({len(pattern)} chars). Maximum: 10000 chars\n"
+            "Tip: Break complex patterns into multiple searches"
+        )
+
+    return pattern
+
+
+def validate_language(language: str) -> str:
+    """
+    Validate language is supported by ast-grep.
+
+    Args:
+        language: Language identifier (e.g., 'python', 'javascript')
+
+    Returns:
+        Language string if valid (or empty string for auto-detection)
+
+    Raises:
+        ValueError: With helpful suggestions
+    """
+    if not language:
+        return ""  # Empty is valid (auto-detection)
+
+    language = language.lower().strip()
+    supported = get_supported_languages()
+
+    if language not in supported:
+        # Try to find similar languages for helpful error message
+        close_matches = [lang for lang in supported if language in lang or lang in language]
+
+        error_msg = f"Unsupported language: '{language}'\n"
+
+        if close_matches:
+            error_msg += f"Did you mean: {', '.join(close_matches[:3])}?\n"
+
+        error_msg += "Supported languages include: python, javascript, typescript, rust, go, java\n"
+        error_msg += "Tip: Leave empty for auto-detection based on file extensions"
+
+        raise ValueError(error_msg)
+
+    return language
+
+
+def validate_yaml_rule(yaml_str: str) -> Dict[str, Any]:
+    """
+    Validate YAML rule has required structure for ast-grep.
+
+    Args:
+        yaml_str: YAML rule string
+
+    Returns:
+        Parsed YAML dict if valid
+
+    Raises:
+        ValueError: With specific parsing or structure errors
+    """
+    if not yaml_str or not yaml_str.strip():
+        raise ValueError(
+            "yaml rule cannot be empty\n"
+            "Example:\n"
+            "  id: my-rule\n"
+            "  language: python\n"
+            "  rule:\n"
+            "    pattern: 'def $NAME($$$)'"
+        )
+
+    if len(yaml_str) > 50000:
+        raise ValueError(
+            f"yaml rule is too long ({len(yaml_str)} chars). Maximum: 50000 chars"
+        )
+
+    # Parse YAML
+    try:
+        parsed = yaml.safe_load(yaml_str)
+    except yaml.YAMLError as e:
+        raise ValueError(
+            f"Invalid YAML syntax: {e}\n"
+            "Tip: Check indentation and formatting"
+        )
+
+    # Validate required fields
+    if not isinstance(parsed, dict):
+        raise ValueError("YAML rule must be a dictionary/object")
+
+    required_fields = ['id', 'language', 'rule']
+    missing = [f for f in required_fields if f not in parsed]
+
+    if missing:
+        raise ValueError(
+            f"YAML rule missing required fields: {', '.join(missing)}\n"
+            f"Required fields: {', '.join(required_fields)}\n"
+            "Example:\n"
+            "  id: my-rule\n"
+            "  language: python\n"
+            "  rule:\n"
+            "    pattern: 'def $NAME($$$)'"
+        )
+
+    return cast(Dict[str, Any], parsed)
+
+
+def validate_code_snippet(code: str) -> str:
+    """
+    Validate code snippet is non-empty and within reasonable length.
+
+    Args:
+        code: Code snippet to validate
+
+    Returns:
+        Code string if valid
+
+    Raises:
+        ValueError: With actionable error message
+    """
+    if not code or not code.strip():
+        raise ValueError(
+            "code cannot be empty or whitespace\n"
+            "Provide a code snippet to analyze or test against rules"
+        )
+
+    if len(code) > 100000:
+        raise ValueError(
+            f"code snippet is too long ({len(code)} chars). Maximum: 100000 chars\n"
+            "Tip: Use project folder search for large files"
+        )
+
+    return code
+
 
 def parse_args_and_get_config():
     """Parse command-line arguments and determine config path."""
@@ -63,9 +253,9 @@ DumpFormat = Literal["pattern", "cst", "ast"]
 def register_mcp_tools() -> None:
     @mcp.tool()
     def dump_syntax_tree(
-        code: str = Field(description = "The code you need"),
-        language: str = Field(description = f"The language of the code. Supported: {', '.join(get_supported_languages())}"),
-        format: DumpFormat = Field(description = "Code dump format. Available values: pattern, ast, cst", default = "cst"),
+        code: str = Field(description="Code snippet or pattern to analyze. Examples: 'def foo(): pass', 'console.log(x)'"),
+        language: str = Field(description="Programming language (e.g., python, javascript, rust). Required."),
+        format: DumpFormat = Field(description="Code dump format. Available values: pattern, ast, cst", default="cst"),
     ) -> str:
         """
         Dump code's syntax structure or dump a query's pattern structure.
@@ -77,13 +267,19 @@ def register_mcp_tools() -> None:
 
         Internally calls: ast-grep run --pattern <code> --lang <language> --debug-query=<format>
         """
+        # Validate inputs
+        code = validate_code_snippet(code)
+        language = validate_language(language)
+        if not language:
+            raise ValueError("language parameter is required for dump_syntax_tree")
+
         result = run_ast_grep("run", ["--pattern", code, "--lang", language, f"--debug-query={format}"])
         return result.stderr.strip()  # type: ignore[no-any-return]
 
     @mcp.tool()
     def test_match_code_rule(
-        code: str = Field(description = "The code to test against the rule"),
-        yaml: str = Field(description = "The ast-grep YAML rule to search. It must have id, language, rule fields."),
+        code: str = Field(description="Code snippet to test against the rule. Can be a few lines or complete file."),
+        yaml: str = Field(description="ast-grep YAML rule with id, language, and rule fields."),
     ) -> List[dict[str, Any]]:
         """
         Test a code against an ast-grep YAML rule.
@@ -91,20 +287,32 @@ def register_mcp_tools() -> None:
 
         Internally calls: ast-grep scan --inline-rules <yaml> --json --stdin
         """
-        result = run_ast_grep("scan", ["--inline-rules", yaml, "--json", "--stdin"], input_text = code)
+        # Validate inputs
+        code = validate_code_snippet(code)
+        validate_yaml_rule(yaml)  # Validates structure and required fields
+
+        result = run_ast_grep("scan", ["--inline-rules", yaml, "--json", "--stdin"], input_text=code)
         matches = json.loads(result.stdout.strip())
         if not matches:
-            raise ValueError("No matches found for the given code and rule. Try adding `stopBy: end` to your inside/has rule.")
+            raise ValueError(
+                "No matches found for the given code and rule.\n"
+                "Common issues:\n"
+                "- Try adding `stopBy: end` to your inside/has relational rules\n"
+                "- Use dump_syntax_tree to verify your code's AST structure\n"
+                "- Check that your pattern is valid for the target language"
+            )
         return matches  # type: ignore[no-any-return]
 
     @mcp.tool()
     def find_code(
-        project_folder: str = Field(description = "The absolute path to the project folder. It must be absolute path."),
-        pattern: str = Field(description = "The ast-grep pattern to search for. Note, the pattern must have valid AST structure."),
-        language: str = Field(description = f"The language of the code. Supported: {', '.join(get_supported_languages())}. "
-                                           "If not specified, will be auto-detected based on file extensions.", default = ""),
-        max_results: int = Field(default = 0, description = "Maximum results to return"),
-        output_format: str = Field(default = "text", description = "'text' or 'json'"),
+        project_folder: str = Field(description="Absolute path to the project folder to search."),
+        pattern: str = Field(description="ast-grep pattern to search for. Examples: 'class $NAME', 'def $FUNC($$$)'"),
+        language: str = Field(
+            default="",
+            description="Programming language (e.g., python, javascript, rust). Leave empty for auto-detection."
+        ),
+        max_results: int = Field(default=0, description="Maximum results to return (0 = unlimited)"),
+        output_format: str = Field(default="text", description="'text' (compact, efficient) or 'json' (full metadata)"),
     ) -> str | List[dict[str, Any]]:
         """
         Find code in a project folder that matches the given ast-grep pattern.
@@ -136,15 +344,27 @@ def register_mcp_tools() -> None:
           find_code(pattern="class $NAME", max_results=20)  # Returns text format
           find_code(pattern="class $NAME", output_format="json")  # Returns JSON with metadata
         """
+        # Validate inputs
+        project_path = validate_project_folder(project_folder)
+        pattern = validate_pattern(pattern)
+        language = validate_language(language)
+
         if output_format not in ["text", "json"]:
-            raise ValueError(f"Invalid output_format: {output_format}. Must be 'text' or 'json'.")
+            raise ValueError(
+                f"Invalid output_format: '{output_format}'. Must be 'text' or 'json'\n"
+                "- 'text': Compact format, ~75% fewer tokens\n"
+                "- 'json': Full metadata with ranges and metavariables"
+            )
+
+        if max_results < 0:
+            raise ValueError(f"max_results must be >= 0, got: {max_results}")
 
         args = ["--pattern", pattern]
         if language:
             args.extend(["--lang", language])
 
         # Always get JSON internally for accurate match limiting
-        result = run_ast_grep("run", args + ["--json", project_folder])
+        result = run_ast_grep("run", args + ["--json", str(project_path)])
         matches = json.loads(result.stdout.strip() or "[]")
 
         # Apply max_results limit to complete matches
@@ -164,11 +384,11 @@ def register_mcp_tools() -> None:
 
     @mcp.tool()
     def find_code_by_rule(
-        project_folder: str = Field(description = "The absolute path to the project folder. It must be absolute path."),
-        yaml: str = Field(description = "The ast-grep YAML rule to search. It must have id, language, rule fields."),
-        max_results: int = Field(default = 0, description = "Maximum results to return"),
-        output_format: str = Field(default = "text", description = "'text' or 'json'"),
-        ) -> str | List[dict[str, Any]]:
+        project_folder: str = Field(description="Absolute path to the project folder to search."),
+        yaml: str = Field(description="ast-grep YAML rule with id, language, and rule fields."),
+        max_results: int = Field(default=0, description="Maximum results to return (0 = unlimited)"),
+        output_format: str = Field(default="text", description="'text' (compact, efficient) or 'json' (full metadata)"),
+    ) -> str | List[dict[str, Any]]:
         """
         Find code using ast-grep's YAML rule in a project folder.
         YAML rule is more powerful than simple pattern and can perform complex search like find AST inside/having another AST.
@@ -201,13 +421,24 @@ def register_mcp_tools() -> None:
           find_code_by_rule(yaml="id: x\\nlanguage: python\\nrule: {pattern: 'class $NAME'}", max_results=20)
           find_code_by_rule(yaml="...", output_format="json")  # For full metadata
         """
+        # Validate inputs
+        project_path = validate_project_folder(project_folder)
+        validate_yaml_rule(yaml)  # Validates structure and required fields
+
         if output_format not in ["text", "json"]:
-            raise ValueError(f"Invalid output_format: {output_format}. Must be 'text' or 'json'.")
+            raise ValueError(
+                f"Invalid output_format: '{output_format}'. Must be 'text' or 'json'\n"
+                "- 'text': Compact format, ~75% fewer tokens\n"
+                "- 'json': Full metadata with ranges and metavariables"
+            )
+
+        if max_results < 0:
+            raise ValueError(f"max_results must be >= 0, got: {max_results}")
 
         args = ["--inline-rules", yaml]
 
         # Always get JSON internally for accurate match limiting
-        result = run_ast_grep("scan", args + ["--json", project_folder])
+        result = run_ast_grep("scan", args + ["--json", str(project_path)])
         matches = json.loads(result.stdout.strip() or "[]")
 
         # Apply max_results limit to complete matches
