@@ -14,6 +14,16 @@ from pydantic import Field
 CONFIG_PATH = None
 
 # ============================================================================
+# Input Validation Constants
+# ============================================================================
+
+# Maximum allowed lengths for input validation (prevents excessive memory usage
+# and subprocess failures)
+MAX_PATTERN_LENGTH = 10000      # ast-grep patterns
+MAX_YAML_RULE_LENGTH = 50000    # YAML rule configurations
+MAX_CODE_SNIPPET_LENGTH = 100000  # Code snippets for testing
+
+# ============================================================================
 # Input Validation Functions
 # ============================================================================
 
@@ -71,9 +81,9 @@ def validate_pattern(pattern: str) -> str:
 
     pattern = pattern.strip()
 
-    if len(pattern) > 10000:
+    if len(pattern) > MAX_PATTERN_LENGTH:
         raise ValueError(
-            f"pattern is too long ({len(pattern)} chars). Maximum: 10000 chars\n"
+            f"pattern is too long ({len(pattern)} chars). Maximum: {MAX_PATTERN_LENGTH} chars\n"
             "Tip: Break complex patterns into multiple searches"
         )
 
@@ -139,9 +149,9 @@ def validate_yaml_rule(yaml_str: str) -> Dict[str, Any]:
             "    pattern: 'def $NAME($$$)'"
         )
 
-    if len(yaml_str) > 50000:
+    if len(yaml_str) > MAX_YAML_RULE_LENGTH:
         raise ValueError(
-            f"yaml rule is too long ({len(yaml_str)} chars). Maximum: 50000 chars"
+            f"yaml rule is too long ({len(yaml_str)} chars). Maximum: {MAX_YAML_RULE_LENGTH} chars"
         )
 
     # Parse YAML
@@ -193,9 +203,9 @@ def validate_code_snippet(code: str) -> str:
             "Provide a code snippet to analyze or test against rules"
         )
 
-    if len(code) > 100000:
+    if len(code) > MAX_CODE_SNIPPET_LENGTH:
         raise ValueError(
-            f"code snippet is too long ({len(code)} chars). Maximum: 100000 chars\n"
+            f"code snippet is too long ({len(code)} chars). Maximum: {MAX_CODE_SNIPPET_LENGTH} chars\n"
             "Tip: Use project folder search for large files"
         )
 

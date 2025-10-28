@@ -45,6 +45,9 @@ with patch("mcp.server.fastmcp.FastMCP", MockFastMCP):
     with patch("pydantic.Field", mock_field):
         import main
         from main import (
+            MAX_CODE_SNIPPET_LENGTH,
+            MAX_PATTERN_LENGTH,
+            MAX_YAML_RULE_LENGTH,
             format_matches_as_text,
             run_ast_grep,
             run_command,
@@ -492,7 +495,7 @@ class TestValidation:
 
     def test_validate_pattern_too_long(self):
         """Test rejection of overly long patterns"""
-        long_pattern = "x" * 10001
+        long_pattern = "x" * (MAX_PATTERN_LENGTH + 1)
         with pytest.raises(ValueError, match="too long"):
             validate_pattern(long_pattern)
 
@@ -536,7 +539,7 @@ rule:
 
     def test_validate_yaml_rule_too_long(self):
         """Test rejection of overly long YAML"""
-        long_yaml = "x" * 50001
+        long_yaml = "x" * (MAX_YAML_RULE_LENGTH + 1)
         with pytest.raises(ValueError, match="too long"):
             validate_yaml_rule(long_yaml)
 
@@ -588,7 +591,7 @@ rule:
 
     def test_validate_code_snippet_too_long(self):
         """Test rejection of overly long code"""
-        long_code = "x" * 100001
+        long_code = "x" * (MAX_CODE_SNIPPET_LENGTH + 1)
         with pytest.raises(ValueError, match="too long"):
             validate_code_snippet(long_code)
 
