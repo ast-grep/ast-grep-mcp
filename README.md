@@ -238,5 +238,6 @@ This is an experimental project. Issues and pull requests are welcome!
 - [ast-grep](https://ast-grep.github.io/) - The core structural search tool
 - [Model Context Protocol](https://modelcontextprotocol.io/) - The protocol this server implements
 - [FastMCP](https://github.com/pydantic/fastmcp) - The Python MCP framework used
+- [Codemod MCP](https://docs.codemod.com/model-context-protocol) - Gives AI assistants tools like tree-sitter AST and node types, ast-grep instructions (YAML and JS ast-grep), and Codemod CLI commands to easily build, publish, and run ast-grep based codemods.
 
 [![MseeP.ai Security Assessment Badge](https://mseep.net/pr/ast-grep-ast-grep-mcp-badge.png)](https://mseep.ai/app/ast-grep-ast-grep-mcp)
