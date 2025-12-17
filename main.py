@@ -286,14 +286,31 @@ def run_command(args: List[str], input_text: Optional[str] = None) -> subprocess
             capture_output=True,
             input=input_text,
             text=True,
-            check=True,  # Raises CalledProcessError if return code is non-zero
+            check=False,  # Don't raise on non-zero exit code, handle it manually
             shell=use_shell
         )
+
+        # ast-grep returns exit code 1 when no matches are found, but this is not an error.
+        # Only raise an exception for actual errors (exit code != 0 and != 1)
+        # or when exit code is 1 but stdout doesn't look like valid JSON output
+        if result.returncode != 0:
+            if result.returncode == 1 and args[0] == "ast-grep":
+                stdout_stripped = result.stdout.strip()
+
+                # Valid "no matches" cases: empty JSON array or valid JSON with matches
+                if stdout_stripped in ("", "[]") or stdout_stripped.startswith("["):
+                    return result
+
+                # If --json flag is not present, empty stdout is also valid "no matches"
+                if "--json" not in args and stdout_stripped == "":
+                    return result
+
+            # For all other non-zero exit codes, raise an error
+            stderr_msg = result.stderr.strip() if result.stderr else "(no error output)"
+            error_msg = f"Command {args} failed with exit code {result.returncode}: {stderr_msg}"
+            raise RuntimeError(error_msg)
+
         return result
-    except subprocess.CalledProcessError as e:
-        stderr_msg = e.stderr.strip() if e.stderr else "(no error output)"
-        error_msg = f"Command {e.cmd} failed with exit code {e.returncode}: {stderr_msg}"
-        raise RuntimeError(error_msg) from e
     except FileNotFoundError as e:
         error_msg = f"Command '{args[0]}' not found. Please ensure {args[0]} is installed and in PATH."
         raise RuntimeError(error_msg) from e
