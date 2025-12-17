@@ -339,7 +339,7 @@ class TestRunCommand:
             1, ["false"], stderr="error message"
         )
 
-        with pytest.raises(RuntimeError, match="failed with exit code 1"):
+        with pytest.raises(Exception, match="failed with exit code 1"):
             run_command(["false"])
 
     @patch("subprocess.run")

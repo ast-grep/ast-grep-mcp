@@ -280,13 +280,14 @@ def run_command(args: List[str], input_text: Optional[str] = None) -> subprocess
         # On Windows, if ast-grep is installed via npm, it's a batch file
         # that requires shell=True to execute properly
         use_shell = (sys.platform == "win32" and args[0] == "ast-grep")
+        need_check = len(args) < 2 or  args[1] != "run"
 
         result = subprocess.run(
             args,
             capture_output=True,
             input=input_text,
             text=True,
-            check=False,  # Don't raise on non-zero exit code, handle it manually
+            check=need_check,  # Don't raise on non-zero exit code, handle it manually
             shell=use_shell
         )
 
@@ -294,7 +295,7 @@ def run_command(args: List[str], input_text: Optional[str] = None) -> subprocess
         # Only raise an exception for actual errors (exit code != 0 and != 1)
         # or when exit code is 1 but stdout doesn't look like valid JSON output
         if result.returncode != 0:
-            if result.returncode == 1 and args[0] == "ast-grep":
+            if result.returncode == 1:
                 stdout_stripped = result.stdout.strip()
 
                 # Valid "no matches" cases: empty JSON array or valid JSON with matches
@@ -311,6 +312,10 @@ def run_command(args: List[str], input_text: Optional[str] = None) -> subprocess
             raise RuntimeError(error_msg)
 
         return result
+    except subprocess.CalledProcessError as e:
+        stderr_msg = e.stderr.strip() if e.stderr else "(no error output)"
+        error_msg = f"Command {e.cmd} failed with exit code {e.returncode}: {stderr_msg}"
+        raise RuntimeError(error_msg) from e
     except FileNotFoundError as e:
         error_msg = f"Command '{args[0]}' not found. Please ensure {args[0]} is installed and in PATH."
         raise RuntimeError(error_msg) from e
