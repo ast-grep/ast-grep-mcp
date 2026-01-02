@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 from typing import Any, List, Literal, Optional
@@ -9,12 +10,36 @@ import yaml
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
-# Global variable for config path (will be set by parse_args_and_get_config)
+# Multi-session stability: Handle SIGINT gracefully
+# Claude Code sends SIGINT to existing MCP processes when new sessions start
+# We ignore SIGINT to maintain stability for the original session
+def _setup_signal_handlers():
+    """Setup signal handlers for multi-session stability."""
+    def sigint_handler(signum, frame):
+        # Log but don't exit - let the MCP server continue serving
+        print("Received SIGINT - ignoring for multi-session stability", file=sys.stderr)
+
+    def sigterm_handler(signum, frame):
+        # SIGTERM is a polite termination request - we should honor it
+        print("Received SIGTERM - shutting down gracefully", file=sys.stderr)
+        sys.exit(0)
+
+    # Windows doesn't have SIGINT the same way, but we handle it anyway
+    if hasattr(signal, 'SIGINT'):
+        signal.signal(signal.SIGINT, sigint_handler)
+    if hasattr(signal, 'SIGTERM'):
+        signal.signal(signal.SIGTERM, sigterm_handler)
+
+_setup_signal_handlers()
+
+# Global variables (will be set by parse_args_and_get_config)
 CONFIG_PATH = None
+TRANSPORT_TYPE = "stdio"
+SERVER_PORT = 8000
 
 def parse_args_and_get_config():
-    """Parse command-line arguments and determine config path."""
-    global CONFIG_PATH
+    """Parse command-line arguments and determine config path and transport."""
+    global CONFIG_PATH, TRANSPORT_TYPE, SERVER_PORT
 
     # Determine how the script was invoked
     prog = None
@@ -40,7 +65,24 @@ For more information, see: https://github.com/ast-grep/ast-grep-mcp
         metavar='PATH',
         help='Path to sgconfig.yaml file for customizing ast-grep behavior (language mappings, rule directories, etc.)'
     )
+    parser.add_argument(
+        '--transport',
+        type=str,
+        choices=['stdio', 'sse'],
+        default='stdio',
+        help='Transport type for MCP server (default: stdio)'
+    )
+    parser.add_argument(
+        '--port',
+        type=int,
+        default=3101,
+        help='Port for SSE transport (default: 3101)'
+    )
     args = parser.parse_args()
+
+    # Set transport type and port
+    TRANSPORT_TYPE = args.transport
+    SERVER_PORT = args.port
 
     # Determine config path with precedence: --config flag > AST_GREP_CONFIG env > None
     if args.config:
@@ -67,16 +109,7 @@ def register_mcp_tools() -> None:
         language: str = Field(description = f"The language of the code. Supported: {', '.join(get_supported_languages())}"),
         format: DumpFormat = Field(description = "Code dump format. Available values: pattern, ast, cst", default = "cst"),
     ) -> str:
-        """
-        Dump code's syntax structure or dump a query's pattern structure.
-        This is useful to discover correct syntax kind and syntax tree structure. Call it when debugging a rule.
-        The tool requires three arguments: code, language and format. The first two are self-explanatory.
-        `format` is the output format of the syntax tree.
-        use `format=cst` to inspect the code's concrete syntax tree structure, useful to debug target code.
-        use `format=pattern` to inspect how ast-grep interprets a pattern, useful to debug pattern rule.
-
-        Internally calls: ast-grep run --pattern <code> --lang <language> --debug-query=<format>
-        """
+        """Dump code's syntax structure. Use format=cst for concrete syntax tree, format=pattern for pattern debugging."""
         result = run_ast_grep("run", ["--pattern", code, "--lang", language, f"--debug-query={format}"])
         return result.stderr.strip()  # type: ignore[no-any-return]
 
@@ -85,12 +118,7 @@ def register_mcp_tools() -> None:
         code: str = Field(description = "The code to test against the rule"),
         yaml: str = Field(description = "The ast-grep YAML rule to search. It must have id, language, rule fields."),
     ) -> List[dict[str, Any]]:
-        """
-        Test a code against an ast-grep YAML rule.
-        This is useful to test a rule before using it in a project.
-
-        Internally calls: ast-grep scan --inline-rules <yaml> --json --stdin
-        """
+        """Test code against an ast-grep YAML rule. Useful to validate rules before project-wide search."""
         result = run_ast_grep("scan", ["--inline-rules", yaml, "--json", "--stdin"], input_text = code)
         matches = json.loads(result.stdout.strip())
         if not matches:
@@ -107,35 +135,9 @@ def register_mcp_tools() -> None:
         output_format: str = Field(default = "text", description = "'text' or 'json'"),
     ) -> str | List[dict[str, Any]]:
         """
-        Find code in a project folder that matches the given ast-grep pattern.
-        Pattern is good for simple and single-AST node result.
-        For more complex usage, please use YAML by `find_code_by_rule`.
-
-        Internally calls: ast-grep run --pattern <pattern> [--json] <project_folder>
-
-        Output formats:
-        - text (default): Compact text format with file:line-range headers and complete match text
-          Example:
-            Found 2 matches:
-
-            path/to/file.py:10-15
-            def example_function():
-                # function body
-                return result
-
-            path/to/file.py:20-22
-            def another_function():
-                pass
-
-        - json: Full match objects with metadata including ranges, meta-variables, etc.
-
-        The max_results parameter limits the number of complete matches returned (not individual lines).
-        When limited, the header shows "Found X matches (showing first Y of Z)".
-
-        Example usage:
-          find_code(pattern="class $NAME", max_results=20)  # Returns text format
-          find_code(pattern="class $NAME", output_format="json")  # Returns JSON with metadata
-        """
+Find code matching an ast-grep pattern. For simple single-AST node searches.
+Use `find_code_by_rule` for complex searches with inside/has rules.
+"""
         if output_format not in ["text", "json"]:
             raise ValueError(f"Invalid output_format: {output_format}. Must be 'text' or 'json'.")
 
@@ -170,37 +172,9 @@ def register_mcp_tools() -> None:
         output_format: str = Field(default = "text", description = "'text' or 'json'"),
         ) -> str | List[dict[str, Any]]:
         """
-        Find code using ast-grep's YAML rule in a project folder.
-        YAML rule is more powerful than simple pattern and can perform complex search like find AST inside/having another AST.
-        It is a more advanced search tool than the simple `find_code`.
-
-        Tip: When using relational rules (inside/has), add `stopBy: end` to ensure complete traversal.
-
-        Internally calls: ast-grep scan --inline-rules <yaml> [--json] <project_folder>
-
-        Output formats:
-        - text (default): Compact text format with file:line-range headers and complete match text
-          Example:
-            Found 2 matches:
-
-            src/models.py:45-52
-            class UserModel:
-                def __init__(self):
-                    self.id = None
-                    self.name = None
-
-            src/views.py:12
-            class SimpleView: pass
-
-        - json: Full match objects with metadata including ranges, meta-variables, etc.
-
-        The max_results parameter limits the number of complete matches returned (not individual lines).
-        When limited, the header shows "Found X matches (showing first Y of Z)".
-
-        Example usage:
-          find_code_by_rule(yaml="id: x\\nlanguage: python\\nrule: {pattern: 'class $NAME'}", max_results=20)
-          find_code_by_rule(yaml="...", output_format="json")  # For full metadata
-        """
+Find code using ast-grep YAML rule. More powerful than pattern search.
+Supports complex queries with inside/has rules. Add `stopBy: end` for relational rules.
+"""
         if output_format not in ["text", "json"]:
             raise ValueError(f"Invalid output_format: {output_format}. Must be 'text' or 'json'.")
 
@@ -330,9 +304,11 @@ def run_mcp_server() -> None:
     Run the MCP server.
     This function is used to start the MCP server when this script is run directly.
     """
-    parse_args_and_get_config()  # sets CONFIG_PATH
+    parse_args_and_get_config()  # sets CONFIG_PATH, TRANSPORT_TYPE, and SERVER_PORT
     register_mcp_tools()  # tools defined *after* CONFIG_PATH is known
-    mcp.run(transport="stdio")
+    if TRANSPORT_TYPE == "sse":
+        mcp.settings.port = SERVER_PORT
+    mcp.run(transport=TRANSPORT_TYPE)
 
 if __name__ == "__main__":
     run_mcp_server()
