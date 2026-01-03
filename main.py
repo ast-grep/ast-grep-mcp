@@ -39,11 +39,12 @@ _setup_signal_handlers()
 CONFIG_PATH = None
 TRANSPORT_TYPE = "stdio"
 SERVER_PORT = 8000
+AST_GREP_COMMAND = None
 
 
 def parse_args_and_get_config():
     """Parse command-line arguments and determine config path and transport."""
-    global CONFIG_PATH, TRANSPORT_TYPE, SERVER_PORT
+    global CONFIG_PATH, TRANSPORT_TYPE, SERVER_PORT, AST_GREP_COMMAND
 
     # Determine how the script was invoked
     prog = None
@@ -58,6 +59,7 @@ def parse_args_and_get_config():
         epilog="""
 environment variables:
   AST_GREP_CONFIG    Path to sgconfig.yaml file (overridden by --config flag)
+  AST_GREP_PATH      Custom command to run ast-grep (e.g., 'uv run ast-grep')
 
 For more information, see: https://github.com/ast-grep/ast-grep-mcp
         """,
@@ -91,6 +93,9 @@ For more information, see: https://github.com/ast-grep/ast-grep-mcp
             print(f"Error: Config file '{env_config}' specified in AST_GREP_CONFIG does not exist")
             sys.exit(1)
         CONFIG_PATH = env_config
+
+    # Determine ast-grep command from AST_GREP_PATH env variable
+    AST_GREP_COMMAND = os.environ.get("AST_GREP_PATH", "ast-grep")
 
 
 # Initialize FastMCP server
@@ -345,7 +350,14 @@ def run_command(args: List[str], input_text: Optional[str] = None) -> subprocess
     try:
         # On Windows, if ast-grep is installed via npm, it's a batch file
         # that requires shell=True to execute properly
-        use_shell = sys.platform == "win32" and args[0] == "ast-grep"
+        # Also use shell if the command contains spaces (e.g., "uv run ast-grep")
+        use_shell = sys.platform == "win32" and args[0] in ("ast-grep", AST_GREP_COMMAND)
+        if not use_shell and len(args) > 0 and " " in args[0]:
+            # Command has spaces, need to split it into separate arguments
+            use_shell = False
+            split_cmd = args[0].split()
+            args = split_cmd + args[1:]
+
         need_check = len(args) < 2 or args[1] != "run"
 
         result = subprocess.run(
@@ -390,7 +402,8 @@ def run_command(args: List[str], input_text: Optional[str] = None) -> subprocess
 def run_ast_grep(command: str, args: List[str], input_text: Optional[str] = None) -> subprocess.CompletedProcess:
     if CONFIG_PATH:
         args = ["--config", CONFIG_PATH] + args
-    return run_command(["ast-grep", command] + args, input_text)
+    ast_grep_cmd = AST_GREP_COMMAND or "ast-grep"
+    return run_command([ast_grep_cmd, command] + args, input_text)
 
 
 def run_mcp_server() -> None:

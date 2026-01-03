@@ -19,6 +19,9 @@ This MCP server enables AI assistants (like Cursor, Claude Desktop, etc.) to sea
    brew install ast-grep
    nix-shell -p ast-grep
    cargo install ast-grep --locked
+   
+   # Or install via uv (Python package manager)
+   uv add ast-grep-cli
    ```
 
 2. **Install uv**: Python package manager
@@ -99,6 +102,31 @@ You can provide the config file in two ways (in order of precedence):
 
 1. **Command-line argument**: `--config /path/to/sgconfig.yaml`
 2. **Environment variable**: `AST_GREP_CONFIG=/path/to/sgconfig.yaml`
+
+### Custom ast-grep Command Path
+
+If ast-grep is not in your PATH or you need to run it with a wrapper command (e.g., via `uv`), you can configure the command using the `AST_GREP_PATH` environment variable:
+
+```json
+{
+  "mcpServers": {
+    "ast-grep": {
+      "command": "uv",
+      "args": ["--directory", "/absolute/path/to/ast-grep-mcp", "run", "main.py"],
+      "env": {
+        "AST_GREP_PATH": "uv run ast-grep"
+      }
+    }
+  }
+}
+```
+
+**Examples:**
+- `AST_GREP_PATH="uv run ast-grep"` - Run ast-grep via uv
+- `AST_GREP_PATH="/custom/path/to/ast-grep"` - Use ast-grep from a custom location
+- `AST_GREP_PATH="npx ast-grep"` - Run ast-grep via npx
+
+If not set, defaults to `ast-grep` (expects ast-grep to be in PATH).
 
 ## Usage
 
