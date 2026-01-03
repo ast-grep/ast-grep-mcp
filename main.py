@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 from typing import Any, List, Literal, Optional
@@ -9,12 +10,36 @@ import yaml
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
-# Global variable for config path (will be set by parse_args_and_get_config)
+# Multi-session stability: Handle SIGINT gracefully
+# Claude Code sends SIGINT to existing MCP processes when new sessions start
+# We ignore SIGINT to maintain stability for the original session
+def _setup_signal_handlers():
+    """Setup signal handlers for multi-session stability."""
+    def sigint_handler(signum, frame):
+        # Log but don't exit - let the MCP server continue serving
+        print("Received SIGINT - ignoring for multi-session stability", file=sys.stderr)
+
+    def sigterm_handler(signum, frame):
+        # SIGTERM is a polite termination request - we should honor it
+        print("Received SIGTERM - shutting down gracefully", file=sys.stderr)
+        sys.exit(0)
+
+    # Windows doesn't have SIGINT the same way, but we handle it anyway
+    if hasattr(signal, 'SIGINT'):
+        signal.signal(signal.SIGINT, sigint_handler)
+    if hasattr(signal, 'SIGTERM'):
+        signal.signal(signal.SIGTERM, sigterm_handler)
+
+_setup_signal_handlers()
+
+# Global variables (will be set by parse_args_and_get_config)
 CONFIG_PATH = None
+TRANSPORT_TYPE = "stdio"
+SERVER_PORT = 8000
 
 def parse_args_and_get_config():
-    """Parse command-line arguments and determine config path."""
-    global CONFIG_PATH
+    """Parse command-line arguments and determine config path and transport."""
+    global CONFIG_PATH, TRANSPORT_TYPE, SERVER_PORT
 
     # Determine how the script was invoked
     prog = None
@@ -40,7 +65,24 @@ For more information, see: https://github.com/ast-grep/ast-grep-mcp
         metavar='PATH',
         help='Path to sgconfig.yaml file for customizing ast-grep behavior (language mappings, rule directories, etc.)'
     )
+    parser.add_argument(
+        '--transport',
+        type=str,
+        choices=['stdio', 'sse'],
+        default='stdio',
+        help='Transport type for MCP server (default: stdio)'
+    )
+    parser.add_argument(
+        '--port',
+        type=int,
+        default=3101,
+        help='Port for SSE transport (default: 3101)'
+    )
     args = parser.parse_args()
+
+    # Set transport type and port
+    TRANSPORT_TYPE = args.transport
+    SERVER_PORT = args.port
 
     # Determine config path with precedence: --config flag > AST_GREP_CONFIG env > None
     if args.config:
@@ -330,9 +372,11 @@ def run_mcp_server() -> None:
     Run the MCP server.
     This function is used to start the MCP server when this script is run directly.
     """
-    parse_args_and_get_config()  # sets CONFIG_PATH
+    parse_args_and_get_config()  # sets CONFIG_PATH, TRANSPORT_TYPE, and SERVER_PORT
     register_mcp_tools()  # tools defined *after* CONFIG_PATH is known
-    mcp.run(transport="stdio")
+    if TRANSPORT_TYPE == "sse":
+        mcp.settings.port = SERVER_PORT
+    mcp.run(transport=TRANSPORT_TYPE)
 
 if __name__ == "__main__":
     run_mcp_server()
