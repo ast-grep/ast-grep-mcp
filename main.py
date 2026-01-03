@@ -109,7 +109,16 @@ def register_mcp_tools() -> None:
         language: str = Field(description = f"The language of the code. Supported: {', '.join(get_supported_languages())}"),
         format: DumpFormat = Field(description = "Code dump format. Available values: pattern, ast, cst", default = "cst"),
     ) -> str:
-        """Dump code's syntax structure. Use format=cst for concrete syntax tree, format=pattern for pattern debugging."""
+        """
+        Dump code's syntax structure or dump a query's pattern structure.
+        This is useful to discover correct syntax kind and syntax tree structure. Call it when debugging a rule.
+        The tool requires three arguments: code, language and format. The first two are self-explanatory.
+        `format` is the output format of the syntax tree.
+        use `format=cst` to inspect the code's concrete syntax tree structure, useful to debug target code.
+        use `format=pattern` to inspect how ast-grep interprets a pattern, useful to debug pattern rule.
+
+        Internally calls: ast-grep run --pattern <code> --lang <language> --debug-query=<format>
+        """
         result = run_ast_grep("run", ["--pattern", code, "--lang", language, f"--debug-query={format}"])
         return result.stderr.strip()  # type: ignore[no-any-return]
 
@@ -118,7 +127,12 @@ def register_mcp_tools() -> None:
         code: str = Field(description = "The code to test against the rule"),
         yaml: str = Field(description = "The ast-grep YAML rule to search. It must have id, language, rule fields."),
     ) -> List[dict[str, Any]]:
-        """Test code against an ast-grep YAML rule. Useful to validate rules before project-wide search."""
+        """
+        Test a code against an ast-grep YAML rule.
+        This is useful to test a rule before using it in a project.
+
+        Internally calls: ast-grep scan --inline-rules <yaml> --json --stdin
+        """
         result = run_ast_grep("scan", ["--inline-rules", yaml, "--json", "--stdin"], input_text = code)
         matches = json.loads(result.stdout.strip())
         if not matches:
@@ -135,9 +149,35 @@ def register_mcp_tools() -> None:
         output_format: str = Field(default = "text", description = "'text' or 'json'"),
     ) -> str | List[dict[str, Any]]:
         """
-Find code matching an ast-grep pattern. For simple single-AST node searches.
-Use `find_code_by_rule` for complex searches with inside/has rules.
-"""
+        Find code in a project folder that matches the given ast-grep pattern.
+        Pattern is good for simple and single-AST node result.
+        For more complex usage, please use YAML by `find_code_by_rule`.
+
+        Internally calls: ast-grep run --pattern <pattern> [--json] <project_folder>
+
+        Output formats:
+        - text (default): Compact text format with file:line-range headers and complete match text
+          Example:
+            Found 2 matches:
+
+            path/to/file.py:10-15
+            def example_function():
+                # function body
+                return result
+
+            path/to/file.py:20-22
+            def another_function():
+                pass
+
+        - json: Full match objects with metadata including ranges, meta-variables, etc.
+
+        The max_results parameter limits the number of complete matches returned (not individual lines).
+        When limited, the header shows "Found X matches (showing first Y of Z)".
+
+        Example usage:
+          find_code(pattern="class $NAME", max_results=20)  # Returns text format
+          find_code(pattern="class $NAME", output_format="json")  # Returns JSON with metadata
+        """
         if output_format not in ["text", "json"]:
             raise ValueError(f"Invalid output_format: {output_format}. Must be 'text' or 'json'.")
 
@@ -172,9 +212,37 @@ Use `find_code_by_rule` for complex searches with inside/has rules.
         output_format: str = Field(default = "text", description = "'text' or 'json'"),
         ) -> str | List[dict[str, Any]]:
         """
-Find code using ast-grep YAML rule. More powerful than pattern search.
-Supports complex queries with inside/has rules. Add `stopBy: end` for relational rules.
-"""
+        Find code using ast-grep's YAML rule in a project folder.
+        YAML rule is more powerful than simple pattern and can perform complex search like find AST inside/having another AST.
+        It is a more advanced search tool than the simple `find_code`.
+
+        Tip: When using relational rules (inside/has), add `stopBy: end` to ensure complete traversal.
+
+        Internally calls: ast-grep scan --inline-rules <yaml> [--json] <project_folder>
+
+        Output formats:
+        - text (default): Compact text format with file:line-range headers and complete match text
+          Example:
+            Found 2 matches:
+
+            src/models.py:45-52
+            class UserModel:
+                def __init__(self):
+                    self.id = None
+                    self.name = None
+
+            src/views.py:12
+            class SimpleView: pass
+
+        - json: Full match objects with metadata including ranges, meta-variables, etc.
+
+        The max_results parameter limits the number of complete matches returned (not individual lines).
+        When limited, the header shows "Found X matches (showing first Y of Z)".
+
+        Example usage:
+          find_code_by_rule(yaml="id: x\\nlanguage: python\\nrule: {pattern: 'class $NAME'}", max_results=20)
+          find_code_by_rule(yaml="...", output_format="json")  # For full metadata
+        """
         if output_format not in ["text", "json"]:
             raise ValueError(f"Invalid output_format: {output_format}. Must be 'text' or 'json'.")
 
