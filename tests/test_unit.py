@@ -355,6 +355,7 @@ class TestRunAstGrep:
 
     @patch("main.run_command")
     @patch("main.CONFIG_PATH", None)
+    @patch("main.AST_GREP_COMMAND", None)
     def test_without_config(self, mock_run):
         """Test running ast-grep without config"""
         mock_result = Mock()
@@ -367,6 +368,7 @@ class TestRunAstGrep:
 
     @patch("main.run_command")
     @patch("main.CONFIG_PATH", "/path/to/config.yaml")
+    @patch("main.AST_GREP_COMMAND", None)
     def test_with_config(self, mock_run):
         """Test running ast-grep with config"""
         mock_result = Mock()
@@ -378,6 +380,42 @@ class TestRunAstGrep:
         mock_run.assert_called_once_with(
             [
                 "ast-grep",
+                "scan",
+                "--config",
+                "/path/to/config.yaml",
+                "--inline-rules",
+                "rule",
+            ],
+            None,
+        )
+
+    @patch("main.run_command")
+    @patch("main.CONFIG_PATH", None)
+    @patch("main.AST_GREP_COMMAND", "uv run ast-grep")
+    def test_with_custom_command(self, mock_run):
+        """Test running ast-grep with custom command path"""
+        mock_result = Mock()
+        mock_run.return_value = mock_result
+
+        result = run_ast_grep("run", ["--pattern", "test"])
+
+        assert result == mock_result
+        mock_run.assert_called_once_with(["uv run ast-grep", "run", "--pattern", "test"], None)
+
+    @patch("main.run_command")
+    @patch("main.CONFIG_PATH", "/path/to/config.yaml")
+    @patch("main.AST_GREP_COMMAND", "/custom/path/to/ast-grep")
+    def test_with_config_and_custom_command(self, mock_run):
+        """Test running ast-grep with both config and custom command"""
+        mock_result = Mock()
+        mock_run.return_value = mock_result
+
+        result = run_ast_grep("scan", ["--inline-rules", "rule"])
+
+        assert result == mock_result
+        mock_run.assert_called_once_with(
+            [
+                "/custom/path/to/ast-grep",
                 "scan",
                 "--config",
                 "/path/to/config.yaml",
