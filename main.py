@@ -402,7 +402,7 @@ def run_mcp_server() -> None:
     register_mcp_tools()  # tools defined *after* CONFIG_PATH is known
     if TRANSPORT_TYPE == "sse":
         mcp.settings.port = SERVER_PORT
-    mcp.run(transport=TRANSPORT_TYPE)
+    mcp.run(transport=TRANSPORT_TYPE) # type: ignore[arg-type]
 
 
 if __name__ == "__main__":
