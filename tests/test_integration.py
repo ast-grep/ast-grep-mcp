@@ -92,11 +92,9 @@ class TestIntegration:
         """Test find_code_by_rule with mocked ast-grep"""
         # Mock the response with JSON format (since we always use JSON internally)
         mock_result = Mock()
-        mock_matches = [{
-            "text": "class Calculator:\n    pass",
-            "file": "fixtures/example.py",
-            "range": {"start": {"line": 6}, "end": {"line": 7}}
-        }]
+        mock_matches = [
+            {"text": "class Calculator:\n    pass", "file": "fixtures/example.py", "range": {"start": {"line": 6}, "end": {"line": 7}}}
+        ]
         mock_result.stdout = json.dumps(mock_matches)
         mock_run.return_value = mock_result
 
@@ -105,18 +103,14 @@ language: python
 rule:
   pattern: class $NAME"""
 
-        result = find_code_by_rule(
-            project_folder=fixtures_dir, yaml=yaml_rule, output_format="text"
-        )
+        result = find_code_by_rule(project_folder=fixtures_dir, yaml=yaml_rule, output_format="text")
 
         assert "Calculator" in result
         assert "Found 1 match" in result
         assert "fixtures/example.py:7-8" in result
 
         # Verify the command was called correctly
-        mock_run.assert_called_once_with(
-            "scan", ["--inline-rules", yaml_rule, "--json", fixtures_dir]
-        )
+        mock_run.assert_called_once_with("scan", ["--inline-rules", yaml_rule, "--json", fixtures_dir])
 
     def test_find_code_with_max_results(self, fixtures_dir):
         """Test find_code with max_results parameter"""

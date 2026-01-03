@@ -88,9 +88,7 @@ class TestDumpSyntaxTree:
         result = dump_syntax_tree("$VAR", "python", "pattern")
 
         assert result == "pattern_node"
-        mock_run.assert_called_once_with(
-            "run", ["--pattern", "$VAR", "--lang", "python", "--debug-query=pattern"]
-        )
+        mock_run.assert_called_once_with("run", ["--pattern", "$VAR", "--lang", "python", "--debug-query=pattern"])
 
 
 class TestTestMatchCodeRule:
@@ -113,9 +111,7 @@ rule:
         result = match_code_rule(code, yaml_rule)
 
         assert result == [{"text": "def foo(): pass"}]
-        mock_run.assert_called_once_with(
-            "scan", ["--inline-rules", yaml_rule, "--json", "--stdin"], input_text=code
-        )
+        mock_run.assert_called_once_with("scan", ["--inline-rules", yaml_rule, "--json", "--stdin"], input_text=code)
 
     @patch("main.run_ast_grep")
     def test_no_match(self, mock_run):
@@ -143,10 +139,8 @@ class TestFindCode:
         """Test text format output with results"""
         mock_result = Mock()
         mock_matches = [
-            {"text": "def foo():\n    pass", "file": "file.py",
-             "range": {"start": {"line": 0}, "end": {"line": 1}}},
-            {"text": "def bar():\n    return", "file": "file.py",
-             "range": {"start": {"line": 4}, "end": {"line": 5}}}
+            {"text": "def foo():\n    pass", "file": "file.py", "range": {"start": {"line": 0}, "end": {"line": 1}}},
+            {"text": "def bar():\n    return", "file": "file.py", "range": {"start": {"line": 4}, "end": {"line": 5}}},
         ]
         mock_result.stdout = json.dumps(mock_matches)
         mock_run.return_value = mock_result
@@ -163,9 +157,7 @@ class TestFindCode:
         assert "def bar():" in result
         assert "file.py:1-2" in result
         assert "file.py:5-6" in result
-        mock_run.assert_called_once_with(
-            "run", ["--pattern", "def $NAME():", "--lang", "python", "--json", "/test/path"]
-        )
+        mock_run.assert_called_once_with("run", ["--pattern", "def $NAME():", "--lang", "python", "--json", "/test/path"])
 
     @patch("main.run_ast_grep")
     def test_text_format_no_results(self, mock_run):
@@ -174,14 +166,10 @@ class TestFindCode:
         mock_result.stdout = "[]"
         mock_run.return_value = mock_result
 
-        result = find_code(
-            project_folder="/test/path", pattern="nonexistent", output_format="text"
-        )
+        result = find_code(project_folder="/test/path", pattern="nonexistent", output_format="text")
 
         assert result == "No matches found"
-        mock_run.assert_called_once_with(
-            "run", ["--pattern", "nonexistent", "--json", "/test/path"]
-        )
+        mock_run.assert_called_once_with("run", ["--pattern", "nonexistent", "--json", "/test/path"])
 
     @patch("main.run_ast_grep")
     def test_text_format_with_max_results(self, mock_run):
@@ -219,14 +207,10 @@ class TestFindCode:
         mock_result.stdout = json.dumps(mock_matches)
         mock_run.return_value = mock_result
 
-        result = find_code(
-            project_folder="/test/path", pattern="def $NAME():", output_format="json"
-        )
+        result = find_code(project_folder="/test/path", pattern="def $NAME():", output_format="json")
 
         assert result == mock_matches
-        mock_run.assert_called_once_with(
-            "run", ["--pattern", "def $NAME():", "--json", "/test/path"]
-        )
+        mock_run.assert_called_once_with("run", ["--pattern", "def $NAME():", "--json", "/test/path"])
 
     @patch("main.run_ast_grep")
     def test_json_format_with_max_results(self, mock_run):
@@ -250,9 +234,7 @@ class TestFindCode:
     def test_invalid_output_format(self):
         """Test with invalid output format"""
         with pytest.raises(ValueError, match="Invalid output_format"):
-            find_code(
-                project_folder="/test/path", pattern="pattern", output_format="invalid"
-            )
+            find_code(project_folder="/test/path", pattern="pattern", output_format="invalid")
 
 
 class TestFindCodeByRule:
@@ -263,10 +245,8 @@ class TestFindCodeByRule:
         """Test text format output with results"""
         mock_result = Mock()
         mock_matches = [
-            {"text": "class Foo:\n    pass", "file": "file.py",
-             "range": {"start": {"line": 0}, "end": {"line": 1}}},
-            {"text": "class Bar:\n    pass", "file": "file.py",
-             "range": {"start": {"line": 9}, "end": {"line": 10}}}
+            {"text": "class Foo:\n    pass", "file": "file.py", "range": {"start": {"line": 0}, "end": {"line": 1}}},
+            {"text": "class Bar:\n    pass", "file": "file.py", "range": {"start": {"line": 9}, "end": {"line": 10}}},
         ]
         mock_result.stdout = json.dumps(mock_matches)
         mock_run.return_value = mock_result
@@ -277,18 +257,14 @@ rule:
   pattern: 'class $NAME'
 """
 
-        result = find_code_by_rule(
-            project_folder="/test/path", yaml=yaml_rule, output_format="text"
-        )
+        result = find_code_by_rule(project_folder="/test/path", yaml=yaml_rule, output_format="text")
 
         assert "Found 2 matches:" in result
         assert "class Foo:" in result
         assert "class Bar:" in result
         assert "file.py:1-2" in result
         assert "file.py:10-11" in result
-        mock_run.assert_called_once_with(
-            "scan", ["--inline-rules", yaml_rule, "--json", "/test/path"]
-        )
+        mock_run.assert_called_once_with("scan", ["--inline-rules", yaml_rule, "--json", "/test/path"])
 
     @patch("main.run_ast_grep")
     def test_json_format(self, mock_run):
@@ -304,14 +280,10 @@ rule:
   pattern: 'class $NAME'
 """
 
-        result = find_code_by_rule(
-            project_folder="/test/path", yaml=yaml_rule, output_format="json"
-        )
+        result = find_code_by_rule(project_folder="/test/path", yaml=yaml_rule, output_format="json")
 
         assert result == mock_matches
-        mock_run.assert_called_once_with(
-            "scan", ["--inline-rules", yaml_rule, "--json", "/test/path"]
-        )
+        mock_run.assert_called_once_with("scan", ["--inline-rules", yaml_rule, "--json", "/test/path"])
 
 
 class TestRunCommand:
@@ -328,16 +300,12 @@ class TestRunCommand:
         result = run_command(["echo", "test"])
 
         assert result.stdout == "output"
-        mock_run.assert_called_once_with(
-            ["echo", "test"], capture_output=True, input=None, text=True, check=True, shell=False
-        )
+        mock_run.assert_called_once_with(["echo", "test"], capture_output=True, input=None, text=True, check=True, shell=False)
 
     @patch("subprocess.run")
     def test_command_failure(self, mock_run):
         """Test command execution failure"""
-        mock_run.side_effect = subprocess.CalledProcessError(
-            1, ["false"], stderr="error message"
-        )
+        mock_run.side_effect = subprocess.CalledProcessError(1, ["false"], stderr="error message")
 
         with pytest.raises(Exception, match="failed with exit code 1"):
             run_command(["false"])
@@ -361,41 +329,21 @@ class TestFormatMatchesAsText:
 
     def test_single_line_match(self):
         """Test formatting a single-line match"""
-        matches = [
-            {
-                "text": "const x = 1",
-                "file": "test.js",
-                "range": {"start": {"line": 4}, "end": {"line": 4}}
-            }
-        ]
+        matches = [{"text": "const x = 1", "file": "test.js", "range": {"start": {"line": 4}, "end": {"line": 4}}}]
         result = format_matches_as_text(matches)
         assert result == "test.js:5\nconst x = 1"
 
     def test_multi_line_match(self):
         """Test formatting a multi-line match"""
-        matches = [
-            {
-                "text": "def foo():\n    return 42",
-                "file": "test.py",
-                "range": {"start": {"line": 9}, "end": {"line": 10}}
-            }
-        ]
+        matches = [{"text": "def foo():\n    return 42", "file": "test.py", "range": {"start": {"line": 9}, "end": {"line": 10}}}]
         result = format_matches_as_text(matches)
         assert result == "test.py:10-11\ndef foo():\n    return 42"
 
     def test_multiple_matches(self):
         """Test formatting multiple matches"""
         matches = [
-            {
-                "text": "match1",
-                "file": "file1.py",
-                "range": {"start": {"line": 0}, "end": {"line": 0}}
-            },
-            {
-                "text": "match2\nline2",
-                "file": "file2.py",
-                "range": {"start": {"line": 5}, "end": {"line": 6}}
-            }
+            {"text": "match1", "file": "file1.py", "range": {"start": {"line": 0}, "end": {"line": 0}}},
+            {"text": "match2\nline2", "file": "file2.py", "range": {"start": {"line": 5}, "end": {"line": 6}}},
         ]
         result = format_matches_as_text(matches)
         expected = "file1.py:1\nmatch1\n\nfile2.py:6-7\nmatch2\nline2"

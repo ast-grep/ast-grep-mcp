@@ -10,11 +10,13 @@ import yaml
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
+
 # Multi-session stability: Handle SIGINT gracefully
 # Claude Code sends SIGINT to existing MCP processes when new sessions start
 # We ignore SIGINT to maintain stability for the original session
 def _setup_signal_handlers():
     """Setup signal handlers for multi-session stability."""
+
     def sigint_handler(signum, frame):
         # Log but don't exit - let the MCP server continue serving
         print("Received SIGINT - ignoring for multi-session stability", file=sys.stderr)
@@ -25,10 +27,11 @@ def _setup_signal_handlers():
         sys.exit(0)
 
     # Windows doesn't have SIGINT the same way, but we handle it anyway
-    if hasattr(signal, 'SIGINT'):
+    if hasattr(signal, "SIGINT"):
         signal.signal(signal.SIGINT, sigint_handler)
-    if hasattr(signal, 'SIGTERM'):
+    if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, sigterm_handler)
+
 
 _setup_signal_handlers()
 
@@ -37,47 +40,39 @@ CONFIG_PATH = None
 TRANSPORT_TYPE = "stdio"
 SERVER_PORT = 8000
 
+
 def parse_args_and_get_config():
     """Parse command-line arguments and determine config path and transport."""
     global CONFIG_PATH, TRANSPORT_TYPE, SERVER_PORT
 
     # Determine how the script was invoked
     prog = None
-    if sys.argv[0].endswith('main.py'):
+    if sys.argv[0].endswith("main.py"):
         # Direct execution: python main.py
-        prog = 'python main.py'
+        prog = "python main.py"
 
     # Parse command-line arguments
     parser = argparse.ArgumentParser(
         prog=prog,
-        description='ast-grep MCP Server - Provides structural code search capabilities via Model Context Protocol',
-        epilog='''
+        description="ast-grep MCP Server - Provides structural code search capabilities via Model Context Protocol",
+        epilog="""
 environment variables:
   AST_GREP_CONFIG    Path to sgconfig.yaml file (overridden by --config flag)
 
 For more information, see: https://github.com/ast-grep/ast-grep-mcp
-        ''',
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        '--config',
+        "--config",
         type=str,
-        metavar='PATH',
-        help='Path to sgconfig.yaml file for customizing ast-grep behavior (language mappings, rule directories, etc.)'
+        metavar="PATH",
+        help="Path to sgconfig.yaml file for customizing ast-grep behavior (language mappings, rule directories, etc.)",
     )
     parser.add_argument(
-        '--transport',
-        type=str,
-        choices=['stdio', 'sse'],
-        default='stdio',
-        help='Transport type for MCP server (default: stdio)'
+        "--transport", type=str, choices=["stdio", "sse"], default="stdio", help="Transport type for MCP server (default: stdio)"
     )
-    parser.add_argument(
-        '--port',
-        type=int,
-        default=3101,
-        help='Port for SSE transport (default: 3101)'
-    )
+    parser.add_argument("--port", type=int, default=3101, help="Port for SSE transport (default: 3101)")
     args = parser.parse_args()
 
     # Set transport type and port
@@ -90,24 +85,26 @@ For more information, see: https://github.com/ast-grep/ast-grep-mcp
             print(f"Error: Config file '{args.config}' does not exist")
             sys.exit(1)
         CONFIG_PATH = args.config
-    elif os.environ.get('AST_GREP_CONFIG'):
-        env_config = os.environ.get('AST_GREP_CONFIG')
+    elif os.environ.get("AST_GREP_CONFIG"):
+        env_config = os.environ.get("AST_GREP_CONFIG")
         if env_config and not os.path.exists(env_config):
             print(f"Error: Config file '{env_config}' specified in AST_GREP_CONFIG does not exist")
             sys.exit(1)
         CONFIG_PATH = env_config
+
 
 # Initialize FastMCP server
 mcp = FastMCP("ast-grep")
 
 DumpFormat = Literal["pattern", "cst", "ast"]
 
+
 def register_mcp_tools() -> None:
     @mcp.tool()
     def dump_syntax_tree(
-        code: str = Field(description = "The code you need"),
-        language: str = Field(description = f"The language of the code. Supported: {', '.join(get_supported_languages())}"),
-        format: DumpFormat = Field(description = "Code dump format. Available values: pattern, ast, cst", default = "cst"),
+        code: str = Field(description="The code you need"),
+        language: str = Field(description=f"The language of the code. Supported: {', '.join(get_supported_languages())}"),
+        format: DumpFormat = Field(description="Code dump format. Available values: pattern, ast, cst", default="cst"),
     ) -> str:
         """
         Dump code's syntax structure or dump a query's pattern structure.
@@ -124,8 +121,8 @@ def register_mcp_tools() -> None:
 
     @mcp.tool()
     def test_match_code_rule(
-        code: str = Field(description = "The code to test against the rule"),
-        yaml: str = Field(description = "The ast-grep YAML rule to search. It must have id, language, rule fields."),
+        code: str = Field(description="The code to test against the rule"),
+        yaml: str = Field(description="The ast-grep YAML rule to search. It must have id, language, rule fields."),
     ) -> List[dict[str, Any]]:
         """
         Test a code against an ast-grep YAML rule.
@@ -133,7 +130,7 @@ def register_mcp_tools() -> None:
 
         Internally calls: ast-grep scan --inline-rules <yaml> --json --stdin
         """
-        result = run_ast_grep("scan", ["--inline-rules", yaml, "--json", "--stdin"], input_text = code)
+        result = run_ast_grep("scan", ["--inline-rules", yaml, "--json", "--stdin"], input_text=code)
         matches = json.loads(result.stdout.strip())
         if not matches:
             raise ValueError("No matches found for the given code and rule. Try adding `stopBy: end` to your inside/has rule.")
@@ -141,12 +138,15 @@ def register_mcp_tools() -> None:
 
     @mcp.tool()
     def find_code(
-        project_folder: str = Field(description = "The absolute path to the project folder. It must be absolute path."),
-        pattern: str = Field(description = "The ast-grep pattern to search for. Note, the pattern must have valid AST structure."),
-        language: str = Field(description = f"The language of the code. Supported: {', '.join(get_supported_languages())}. "
-                                           "If not specified, will be auto-detected based on file extensions.", default = ""),
-        max_results: int = Field(default = 0, description = "Maximum results to return"),
-        output_format: str = Field(default = "text", description = "'text' or 'json'"),
+        project_folder: str = Field(description="The absolute path to the project folder. It must be absolute path."),
+        pattern: str = Field(description="The ast-grep pattern to search for. Note, the pattern must have valid AST structure."),
+        language: str = Field(
+            description=f"The language of the code. Supported: {', '.join(get_supported_languages())}. "
+            "If not specified, will be auto-detected based on file extensions.",
+            default="",
+        ),
+        max_results: int = Field(default=0, description="Maximum results to return"),
+        output_format: str = Field(default="text", description="'text' or 'json'"),
     ) -> str | List[dict[str, Any]]:
         """
         Find code in a project folder that matches the given ast-grep pattern.
@@ -206,11 +206,11 @@ def register_mcp_tools() -> None:
 
     @mcp.tool()
     def find_code_by_rule(
-        project_folder: str = Field(description = "The absolute path to the project folder. It must be absolute path."),
-        yaml: str = Field(description = "The ast-grep YAML rule to search. It must have id, language, rule fields."),
-        max_results: int = Field(default = 0, description = "Maximum results to return"),
-        output_format: str = Field(default = "text", description = "'text' or 'json'"),
-        ) -> str | List[dict[str, Any]]:
+        project_folder: str = Field(description="The absolute path to the project folder. It must be absolute path."),
+        yaml: str = Field(description="The ast-grep YAML rule to search. It must have id, language, rule fields."),
+        max_results: int = Field(default=0, description="Maximum results to return"),
+        output_format: str = Field(default="text", description="'text' or 'json'"),
+    ) -> str | List[dict[str, Any]]:
         """
         Find code using ast-grep's YAML rule in a project folder.
         YAML rule is more powerful than simple pattern and can perform complex search like find AST inside/having another AST.
@@ -279,10 +279,10 @@ def format_matches_as_text(matches: List[dict]) -> str:
 
     output_blocks = []
     for m in matches:
-        file_path = m.get('file', '')
-        start_line = m.get('range', {}).get('start', {}).get('line', 0) + 1
-        end_line = m.get('range', {}).get('end', {}).get('line', 0) + 1
-        match_text = m.get('text', '').rstrip()
+        file_path = m.get("file", "")
+        start_line = m.get("range", {}).get("start", {}).get("line", 0) + 1
+        end_line = m.get("range", {}).get("end", {}).get("line", 0) + 1
+        match_text = m.get("text", "").rstrip()
 
         # Format: filepath:start-end (or just :line for single-line matches)
         if start_line == end_line:
@@ -292,37 +292,61 @@ def format_matches_as_text(matches: List[dict]) -> str:
 
         output_blocks.append(f"{header}\n{match_text}")
 
-    return '\n\n'.join(output_blocks)
+    return "\n\n".join(output_blocks)
+
 
 def get_supported_languages() -> List[str]:
     """Get all supported languages as a field description string."""
     languages = [  # https://ast-grep.github.io/reference/languages.html
-        "bash", "c", "cpp", "csharp", "css", "elixir", "go", "haskell",
-        "html", "java", "javascript", "json", "jsx", "kotlin", "lua",
-        "nix", "php", "python", "ruby", "rust", "scala", "solidity",
-        "swift", "tsx", "typescript", "yaml"
+        "bash",
+        "c",
+        "cpp",
+        "csharp",
+        "css",
+        "elixir",
+        "go",
+        "haskell",
+        "html",
+        "java",
+        "javascript",
+        "json",
+        "jsx",
+        "kotlin",
+        "lua",
+        "nix",
+        "php",
+        "python",
+        "ruby",
+        "rust",
+        "scala",
+        "solidity",
+        "swift",
+        "tsx",
+        "typescript",
+        "yaml",
     ]
 
     # Check for custom languages in config file
     # https://ast-grep.github.io/advanced/custom-language.html#register-language-in-sgconfig-yml
     if CONFIG_PATH and os.path.exists(CONFIG_PATH):
         try:
-            with open(CONFIG_PATH, 'r') as f:
+            with open(CONFIG_PATH, "r") as f:
                 config = yaml.safe_load(f)
-                if config and 'customLanguages' in config:
-                    custom_langs = list(config['customLanguages'].keys())
+                if config and "customLanguages" in config:
+                    custom_langs = list(config["customLanguages"].keys())
                     languages += custom_langs
         except Exception:
             pass
 
     return sorted(set(languages))
 
+
 def run_command(args: List[str], input_text: Optional[str] = None) -> subprocess.CompletedProcess:
     try:
         # On Windows, if ast-grep is installed via npm, it's a batch file
         # that requires shell=True to execute properly
-        use_shell = (sys.platform == "win32" and args[0] == "ast-grep")
-        need_check = len(args) < 2 or  args[1] != "run"
+        use_shell = sys.platform == "win32" and args[0] == "ast-grep"
+        need_check = len(args) < 2 or args[1] != "run"
 
         result = subprocess.run(
             args,
@@ -330,7 +354,7 @@ def run_command(args: List[str], input_text: Optional[str] = None) -> subprocess
             input=input_text,
             text=True,
             check=need_check,  # Don't raise on non-zero exit code, handle it manually
-            shell=use_shell
+            shell=use_shell,
         )
 
         # ast-grep returns exit code 1 when no matches are found, but this is not an error.
@@ -362,10 +386,12 @@ def run_command(args: List[str], input_text: Optional[str] = None) -> subprocess
         error_msg = f"Command '{args[0]}' not found. Please ensure {args[0]} is installed and in PATH."
         raise RuntimeError(error_msg) from e
 
-def run_ast_grep(command:str, args: List[str], input_text: Optional[str] = None) -> subprocess.CompletedProcess:
+
+def run_ast_grep(command: str, args: List[str], input_text: Optional[str] = None) -> subprocess.CompletedProcess:
     if CONFIG_PATH:
         args = ["--config", CONFIG_PATH] + args
     return run_command(["ast-grep", command] + args, input_text)
+
 
 def run_mcp_server() -> None:
     """
@@ -377,6 +403,7 @@ def run_mcp_server() -> None:
     if TRANSPORT_TYPE == "sse":
         mcp.settings.port = SERVER_PORT
     mcp.run(transport=TRANSPORT_TYPE)
+
 
 if __name__ == "__main__":
     run_mcp_server()
