@@ -1,6 +1,6 @@
 # ast-grep MCP Server
 
-An experimental [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that provides AI assistants with powerful structural code search capabilities using [ast-grep](https://ast-grep.github.io/).
+[Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that provides AI assistants with powerful structural code search capabilities using [ast-grep](https://ast-grep.github.io/).
 
 ## Overview
 
@@ -21,9 +21,9 @@ This MCP server enables AI assistants (like Cursor, Claude Desktop, etc.) to sea
    cargo install ast-grep --locked
    ```
 
-2. **Install uv**: Python package manager
+2. **Install Rust**: You need the Rust toolchain (cargo) to build the server.
    ```bash
-   curl -LsSf https://astral.sh/uv/install.sh | sh
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    ```
 
 3. **MCP-compatible client**: Such as Cursor, Claude Desktop, or other MCP clients
@@ -36,25 +36,13 @@ This MCP server enables AI assistants (like Cursor, Claude Desktop, etc.) to sea
    cd ast-grep-mcp
    ```
 
-2. Install dependencies:
+2. Build the server:
    ```bash
-   uv sync
+   cd ast-grep-mcp-rs
+   cargo build --release
    ```
 
-3. Verify ast-grep installation:
-   ```bash
-   ast-grep --version
-   ```
-
-## Running with `uvx`
-
-You can run the server directly from GitHub using `uvx`:
-
-```bash
-uvx --from git+https://github.com/ast-grep/ast-grep-mcp ast-grep-server
-```
-
-This is useful for quickly trying out the server without cloning the repository.
+The binary will be located at `ast-grep-mcp-rs/target/release/ast-grep-mcp-server`.
 
 ## Configuration
 
@@ -66,8 +54,8 @@ Add to your MCP settings (usually in `.cursor-mcp/settings.json`):
 {
   "mcpServers": {
     "ast-grep": {
-      "command": "uv",
-      "args": ["--directory", "/absolute/path/to/ast-grep-mcp", "run", "main.py"],
+      "command": "/absolute/path/to/ast-grep-mcp/ast-grep-mcp-rs/target/release/ast-grep-mcp-server",
+      "args": [],
       "env": {}
     }
   }
@@ -82,13 +70,19 @@ Add to your Claude Desktop MCP configuration:
 {
   "mcpServers": {
     "ast-grep": {
-      "command": "uv",
-      "args": ["--directory", "/absolute/path/to/ast-grep-mcp", "run", "main.py"],
+      "command": "/absolute/path/to/ast-grep-mcp/ast-grep-mcp-rs/target/release/ast-grep-mcp-server",
+      "args": [],
       "env": {}
     }
   }
 }
 ```
+
+### CLI Arguments
+
+- `--config PATH`: Path to `sgconfig.yaml` file.
+- `--transport TYPE`: "stdio" (default) or "sse".
+- `--port PORT`: Port for SSE transport (default: 3101).
 
 ### Custom ast-grep Configuration
 
@@ -231,13 +225,10 @@ You can also add support for custom languages through the `sgconfig.yaml` config
 
 ## Contributing
 
-This is an experimental project. Issues and pull requests are welcome!
+Issues and pull requests are welcome!
 
 ## Related Projects
 
 - [ast-grep](https://ast-grep.github.io/) - The core structural search tool
 - [Model Context Protocol](https://modelcontextprotocol.io/) - The protocol this server implements
-- [FastMCP](https://github.com/pydantic/fastmcp) - The Python MCP framework used
 - [Codemod MCP](https://docs.codemod.com/model-context-protocol) - Gives AI assistants tools like tree-sitter AST and node types, ast-grep instructions (YAML and JS ast-grep), and Codemod CLI commands to easily build, publish, and run ast-grep based codemods.
-
-[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/ast-grep-ast-grep-mcp-badge.png)](https://mseep.ai/app/ast-grep-ast-grep-mcp)
