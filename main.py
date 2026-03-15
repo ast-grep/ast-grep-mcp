@@ -265,7 +265,7 @@ def parse_matches(stdout: str, max_results: int = 0) -> tuple[list[dict], int]:
     remaining lines are counted but not deserialized. Non-JSON lines
     (e.g. ast-grep warnings) are skipped.
     """
-    matches = []
+    matches: list[dict] = []
     total_lines = 0
     for line in stdout.splitlines():
         line = line.strip()
