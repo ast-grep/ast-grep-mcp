@@ -262,13 +262,14 @@ def parse_matches(stdout: str, max_results: int = 0) -> tuple[list[dict], int]:
     """Parse JSONL (--json=stream) output with optional early exit.
 
     Returns (matches, total_count). Only parses JSON for kept matches;
-    remaining lines are counted but not deserialized.
+    remaining lines are counted but not deserialized. Non-JSON lines
+    (e.g. ast-grep warnings) are skipped.
     """
     matches = []
     total_lines = 0
     for line in stdout.splitlines():
         line = line.strip()
-        if not line:
+        if not line or not line.startswith("{"):
             continue
         total_lines += 1
         if not max_results or len(matches) < max_results:

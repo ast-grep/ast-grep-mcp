@@ -395,6 +395,31 @@ class TestParseMatches:
         assert len(matches) == 2
         assert total == 2
 
+    def test_non_json_lines_skipped(self):
+        """Test that non-JSON lines (e.g. warnings) are skipped without crashing"""
+        lines = [
+            "WARNING: some ast-grep warning",
+            json.dumps({"text": "match1"}),
+            "another warning line",
+            json.dumps({"text": "match2"}),
+        ]
+        matches, total = parse_matches("\n".join(lines))
+        assert len(matches) == 2
+        assert total == 2
+        assert matches[0]["text"] == "match1"
+
+    def test_non_json_lines_not_counted_with_max_results(self):
+        """Test that warning lines after max_results don't inflate total count"""
+        lines = [
+            json.dumps({"text": "match1"}),
+            json.dumps({"text": "match2"}),
+            "WARNING: something",
+            json.dumps({"text": "match3"}),
+        ]
+        matches, total = parse_matches("\n".join(lines), max_results=1)
+        assert len(matches) == 1
+        assert total == 3  # only JSON lines counted
+
 
 class TestRunAstGrep:
     """Test the run_ast_grep function"""
