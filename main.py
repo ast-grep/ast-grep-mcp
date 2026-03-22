@@ -186,13 +186,8 @@ def register_mcp_tools() -> None:
             args.extend(["--lang", language])
 
         # Always get JSON internally for accurate match limiting
-        result = run_ast_grep("run", args + ["--json", project_folder])
-        matches = json.loads(result.stdout.strip() or "[]")
-
-        # Apply max_results limit to complete matches
-        total_matches = len(matches)
-        if max_results and total_matches > max_results:
-            matches = matches[:max_results]
+        result = run_ast_grep("run", args + ["--json=stream", project_folder])
+        matches, total_matches = parse_matches(result.stdout, max_results)
 
         if output_format == "text":
             if not matches:
@@ -249,13 +244,8 @@ def register_mcp_tools() -> None:
         args = ["--inline-rules", yaml]
 
         # Always get JSON internally for accurate match limiting
-        result = run_ast_grep("scan", args + ["--json", project_folder])
-        matches = json.loads(result.stdout.strip() or "[]")
-
-        # Apply max_results limit to complete matches
-        total_matches = len(matches)
-        if max_results and total_matches > max_results:
-            matches = matches[:max_results]
+        result = run_ast_grep("scan", args + ["--json=stream", project_folder])
+        matches, total_matches = parse_matches(result.stdout, max_results)
 
         if output_format == "text":
             if not matches:
@@ -266,6 +256,25 @@ def register_mcp_tools() -> None:
                 header += f" (showing first {max_results} of {total_matches})"
             return header + ":\n\n" + text_output
         return matches  # type: ignore[no-any-return]
+
+
+def parse_matches(stdout: str, max_results: int = 0) -> tuple[list[dict], int]:
+    """Parse JSONL (--json=stream) output with optional early exit.
+
+    Returns (matches, total_count). Only parses JSON for kept matches;
+    remaining lines are counted but not deserialized. Non-JSON lines
+    (e.g. ast-grep warnings) are skipped.
+    """
+    matches: list[dict] = []
+    total_lines = 0
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        total_lines += 1
+        if not max_results or len(matches) < max_results:
+            matches.append(json.loads(line))
+    return matches, total_lines
 
 
 def format_matches_as_text(matches: List[dict]) -> str:
@@ -365,7 +374,7 @@ def run_command(args: List[str], input_text: Optional[str] = None) -> subprocess
                 stdout_stripped = result.stdout.strip()
 
                 # Valid "no matches" cases: empty JSON array or valid JSON with matches
-                if stdout_stripped in ("", "[]") or stdout_stripped.startswith("["):
+                if stdout_stripped in ("", "[]") or stdout_stripped.startswith("[") or stdout_stripped.startswith("{"):
                     return result
 
                 # If --json flag is not present, empty stdout is also valid "no matches"

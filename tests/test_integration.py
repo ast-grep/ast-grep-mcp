@@ -90,12 +90,12 @@ class TestIntegration:
     @patch("main.run_ast_grep")
     def test_find_code_by_rule(self, mock_run, fixtures_dir):
         """Test find_code_by_rule with mocked ast-grep"""
-        # Mock the response with JSON format (since we always use JSON internally)
+        # Mock the response with JSONL format (since we always use --json=stream internally)
         mock_result = Mock()
         mock_matches = [
             {"text": "class Calculator:\n    pass", "file": "fixtures/example.py", "range": {"start": {"line": 6}, "end": {"line": 7}}}
         ]
-        mock_result.stdout = json.dumps(mock_matches)
+        mock_result.stdout = "\n".join(json.dumps(m) for m in mock_matches)
         mock_run.return_value = mock_result
 
         yaml_rule = """id: test
@@ -110,7 +110,7 @@ rule:
         assert "fixtures/example.py:7-8" in result
 
         # Verify the command was called correctly
-        mock_run.assert_called_once_with("scan", ["--inline-rules", yaml_rule, "--json", fixtures_dir])
+        mock_run.assert_called_once_with("scan", ["--inline-rules", yaml_rule, "--json=stream", fixtures_dir])
 
     def test_find_code_with_max_results(self, fixtures_dir):
         """Test find_code with max_results parameter"""

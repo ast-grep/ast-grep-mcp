@@ -46,6 +46,7 @@ with patch("mcp.server.fastmcp.FastMCP", MockFastMCP):
         import main
         from main import (
             format_matches_as_text,
+            parse_matches,
             run_ast_grep,
             run_command,
         )
@@ -142,7 +143,7 @@ class TestFindCode:
             {"text": "def foo():\n    pass", "file": "file.py", "range": {"start": {"line": 0}, "end": {"line": 1}}},
             {"text": "def bar():\n    return", "file": "file.py", "range": {"start": {"line": 4}, "end": {"line": 5}}},
         ]
-        mock_result.stdout = json.dumps(mock_matches)
+        mock_result.stdout = "\n".join(json.dumps(m) for m in mock_matches)
         mock_run.return_value = mock_result
 
         result = find_code(
@@ -157,19 +158,19 @@ class TestFindCode:
         assert "def bar():" in result
         assert "file.py:1-2" in result
         assert "file.py:5-6" in result
-        mock_run.assert_called_once_with("run", ["--pattern", "def $NAME():", "--lang", "python", "--json", "/test/path"])
+        mock_run.assert_called_once_with("run", ["--pattern", "def $NAME():", "--lang", "python", "--json=stream", "/test/path"])
 
     @patch("main.run_ast_grep")
     def test_text_format_no_results(self, mock_run):
         """Test text format output with no results"""
         mock_result = Mock()
-        mock_result.stdout = "[]"
+        mock_result.stdout = ""
         mock_run.return_value = mock_result
 
         result = find_code(project_folder="/test/path", pattern="nonexistent", output_format="text")
 
         assert result == "No matches found"
-        mock_run.assert_called_once_with("run", ["--pattern", "nonexistent", "--json", "/test/path"])
+        mock_run.assert_called_once_with("run", ["--pattern", "nonexistent", "--json=stream", "/test/path"])
 
     @patch("main.run_ast_grep")
     def test_text_format_with_max_results(self, mock_run):
@@ -181,7 +182,7 @@ class TestFindCode:
             {"text": "match3", "file": "f.py", "range": {"start": {"line": 2}, "end": {"line": 2}}},
             {"text": "match4", "file": "f.py", "range": {"start": {"line": 3}, "end": {"line": 3}}},
         ]
-        mock_result.stdout = json.dumps(mock_matches)
+        mock_result.stdout = "\n".join(json.dumps(m) for m in mock_matches)
         mock_run.return_value = mock_result
 
         result = find_code(
@@ -204,20 +205,20 @@ class TestFindCode:
             {"text": "def foo():", "file": "test.py"},
             {"text": "def bar():", "file": "test.py"},
         ]
-        mock_result.stdout = json.dumps(mock_matches)
+        mock_result.stdout = "\n".join(json.dumps(m) for m in mock_matches)
         mock_run.return_value = mock_result
 
         result = find_code(project_folder="/test/path", pattern="def $NAME():", output_format="json")
 
         assert result == mock_matches
-        mock_run.assert_called_once_with("run", ["--pattern", "def $NAME():", "--json", "/test/path"])
+        mock_run.assert_called_once_with("run", ["--pattern", "def $NAME():", "--json=stream", "/test/path"])
 
     @patch("main.run_ast_grep")
     def test_json_format_with_max_results(self, mock_run):
         """Test JSON format with max_results limit"""
         mock_result = Mock()
         mock_matches = [{"text": "match1"}, {"text": "match2"}, {"text": "match3"}]
-        mock_result.stdout = json.dumps(mock_matches)
+        mock_result.stdout = "\n".join(json.dumps(m) for m in mock_matches)
         mock_run.return_value = mock_result
 
         result = find_code(
@@ -248,7 +249,7 @@ class TestFindCodeByRule:
             {"text": "class Foo:\n    pass", "file": "file.py", "range": {"start": {"line": 0}, "end": {"line": 1}}},
             {"text": "class Bar:\n    pass", "file": "file.py", "range": {"start": {"line": 9}, "end": {"line": 10}}},
         ]
-        mock_result.stdout = json.dumps(mock_matches)
+        mock_result.stdout = "\n".join(json.dumps(m) for m in mock_matches)
         mock_run.return_value = mock_result
 
         yaml_rule = """id: test
@@ -264,14 +265,14 @@ rule:
         assert "class Bar:" in result
         assert "file.py:1-2" in result
         assert "file.py:10-11" in result
-        mock_run.assert_called_once_with("scan", ["--inline-rules", yaml_rule, "--json", "/test/path"])
+        mock_run.assert_called_once_with("scan", ["--inline-rules", yaml_rule, "--json=stream", "/test/path"])
 
     @patch("main.run_ast_grep")
     def test_json_format(self, mock_run):
         """Test JSON format output"""
         mock_result = Mock()
         mock_matches = [{"text": "class Foo:", "file": "test.py"}]
-        mock_result.stdout = json.dumps(mock_matches)
+        mock_result.stdout = "\n".join(json.dumps(m) for m in mock_matches)
         mock_run.return_value = mock_result
 
         yaml_rule = """id: test
@@ -283,7 +284,7 @@ rule:
         result = find_code_by_rule(project_folder="/test/path", yaml=yaml_rule, output_format="json")
 
         assert result == mock_matches
-        mock_run.assert_called_once_with("scan", ["--inline-rules", yaml_rule, "--json", "/test/path"])
+        mock_run.assert_called_once_with("scan", ["--inline-rules", yaml_rule, "--json=stream", "/test/path"])
 
 
 class TestRunCommand:
@@ -348,6 +349,76 @@ class TestFormatMatchesAsText:
         result = format_matches_as_text(matches)
         expected = "file1.py:1\nmatch1\n\nfile2.py:6-7\nmatch2\nline2"
         assert result == expected
+
+
+class TestParseMatches:
+    """Test the parse_matches helper function"""
+
+    def test_empty_input(self):
+        """Test with empty string"""
+        matches, total = parse_matches("")
+        assert matches == []
+        assert total == 0
+
+    def test_normal_parsing(self):
+        """Test parsing JSONL output"""
+        lines = [
+            json.dumps({"text": "match1", "file": "a.py"}),
+            json.dumps({"text": "match2", "file": "b.py"}),
+        ]
+        matches, total = parse_matches("\n".join(lines))
+        assert len(matches) == 2
+        assert total == 2
+        assert matches[0]["text"] == "match1"
+        assert matches[1]["text"] == "match2"
+
+    def test_early_exit_with_max_results(self):
+        """Test that max_results limits parsed matches but counts all lines"""
+        lines = [
+            json.dumps({"text": f"match{i}"}) for i in range(5)
+        ]
+        matches, total = parse_matches("\n".join(lines), max_results=2)
+        assert len(matches) == 2
+        assert total == 5
+        assert matches[0]["text"] == "match0"
+        assert matches[1]["text"] == "match1"
+
+    def test_blank_lines_ignored(self):
+        """Test that blank lines are skipped"""
+        lines = [
+            json.dumps({"text": "match1"}),
+            "",
+            "  ",
+            json.dumps({"text": "match2"}),
+        ]
+        matches, total = parse_matches("\n".join(lines))
+        assert len(matches) == 2
+        assert total == 2
+
+    def test_non_json_lines_skipped(self):
+        """Test that non-JSON lines (e.g. warnings) are skipped without crashing"""
+        lines = [
+            "WARNING: some ast-grep warning",
+            json.dumps({"text": "match1"}),
+            "another warning line",
+            json.dumps({"text": "match2"}),
+        ]
+        matches, total = parse_matches("\n".join(lines))
+        assert len(matches) == 2
+        assert total == 2
+        assert matches[0]["text"] == "match1"
+
+    def test_non_json_lines_not_counted_with_max_results(self):
+        """Test that warning lines after max_results don't inflate total count"""
+        lines = [
+            json.dumps({"text": "match1"}),
+            json.dumps({"text": "match2"}),
+            "WARNING: something",
+            json.dumps({"text": "match3"}),
+        ]
+        matches, total = parse_matches("\n".join(lines), max_results=1)
+        assert len(matches) == 1
+        assert total == 3  # only JSON lines counted
 
 
 class TestRunAstGrep:
