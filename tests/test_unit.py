@@ -196,6 +196,26 @@ def test_resolve_ast_grep_executable_uses_node_for_global_windows_npm_shim(tmp_p
     assert resolved.command_prefix == (str(Path(node).resolve()), str(target))
 
 
+def test_resolve_ast_grep_executable_runs_native_npm_target_directly(tmp_path: Path) -> None:
+    package = tmp_path / "node_modules" / "@ast-grep" / "cli"
+    package.mkdir(parents=True)
+    target = package / "ast-grep"
+    target.write_bytes(b"\x7fELF test binary")
+    target.chmod(0o755)
+    (package / "package.json").write_text(
+        json.dumps({"name": "@ast-grep/cli", "bin": "ast-grep"}),
+        encoding="utf-8",
+    )
+    shim = tmp_path / "node_modules" / ".bin" / "ast-grep"
+    shim.parent.mkdir(parents=True)
+    shim.write_text("shim", encoding="utf-8")
+
+    resolved = resolve_ast_grep_executable(str(shim), working_directory=tmp_path)
+
+    assert resolved.path == target
+    assert resolved.command_prefix == (str(target),)
+
+
 def test_run_process_reports_timeout() -> None:
     def timeout_runner(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         raise subprocess.TimeoutExpired(arguments, timeout=1)

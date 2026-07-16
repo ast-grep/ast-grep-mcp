@@ -199,6 +199,16 @@ def _find_npm_ast_grep_bin(shim_path: Path, resolved_path: Path) -> Path | None:
     return None
 
 
+def _requires_node(executable: Path) -> bool:
+    if executable.suffix.lower() in {".cjs", ".js", ".mjs"}:
+        return True
+    try:
+        first_line = executable.open("rb").readline(256)
+    except OSError:
+        return False
+    return first_line.startswith(b"#!") and b"node" in first_line.lower()
+
+
 def resolve_ast_grep_executable(raw_executable: str, *, working_directory: Path) -> ResolvedExecutable:
     raw_path = Path(raw_executable).expanduser()
     has_path_separator = os.sep in raw_executable or (os.altsep is not None and os.altsep in raw_executable)
@@ -221,11 +231,15 @@ def resolve_ast_grep_executable(raw_executable: str, *, working_directory: Path)
 
     npm_bin = _find_npm_ast_grep_bin(shim_path.absolute(), resolved_path)
     if npm_bin is not None:
-        node = shutil.which("node")
-        if node is None:
-            raise ValueError("The @ast-grep/cli launcher requires Node.js, but node was not found")
-        node_path = Path(node).resolve(strict=True)
-        return ResolvedExecutable(path=npm_bin, command_prefix=(str(node_path), str(npm_bin)))
+        if _requires_node(npm_bin):
+            node = shutil.which("node")
+            if node is None:
+                raise ValueError("The @ast-grep/cli launcher requires Node.js, but node was not found")
+            node_path = Path(node).resolve(strict=True)
+            return ResolvedExecutable(path=npm_bin, command_prefix=(str(node_path), str(npm_bin)))
+        if os.name != "nt" and not os.access(npm_bin, os.X_OK):
+            raise ValueError(f"ast-grep executable is not executable: {npm_bin}")
+        return ResolvedExecutable(path=npm_bin, command_prefix=(str(npm_bin),))
 
     if resolved_path.suffix.lower() in {".bat", ".cmd"}:
         raise ValueError(
