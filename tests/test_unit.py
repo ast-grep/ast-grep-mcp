@@ -1,463 +1,466 @@
-"""Unit tests for ast-grep MCP server"""
+from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
-from unittest.mock import Mock, patch
+from pathlib import Path
+from typing import Any
 
 import pytest
 
-# Add the parent directory to the path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from main import (
+    AstGrepService,
+    ResolvedExecutable,
+    ServerRuntime,
+    build_runtime,
+    format_matches_as_text,
+    format_search_results,
+    get_supported_languages,
+    parse_stream_matches,
+    resolve_ast_grep_executable,
+    run_process,
+    validate_rule_yaml,
+)
 
 
-# Mock FastMCP to disable decoration
-class MockFastMCP:
-    """Mock FastMCP that returns functions unchanged"""
+class RecordingRunner:
+    def __init__(self, *, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+        self.calls: list[tuple[list[str], dict[str, Any]]] = []
 
-    def __init__(self, name):
-        self.name = name
-        self.tools = {}  # Store registered tools
-
-    def tool(self, **kwargs):
-        """Decorator that returns the function unchanged"""
-
-        def decorator(func):
-            # Store the function for later retrieval
-            self.tools[func.__name__] = func
-            return func  # Return original function without modification
-
-        return decorator
-
-    def run(self, **kwargs):
-        """Mock run method"""
-        pass
+    def __call__(self, arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        self.calls.append((arguments, kwargs))
+        return subprocess.CompletedProcess(arguments, self.returncode, self.stdout, self.stderr)
 
 
-# Mock the Field function to return the default value
-def mock_field(**kwargs):
-    return kwargs.get("default")
+def make_runtime(
+    root: Path,
+    *,
+    default_max_results: int = 50,
+    max_results_cap: int = 500,
+    forbid_regex_rules: bool = False,
+) -> ServerRuntime:
+    executable = root / "ast-grep-test-executable"
+    executable.write_text("test executable", encoding="utf-8")
+    executable.chmod(0o755)
+    return ServerRuntime(
+        working_directory=root,
+        executable=ResolvedExecutable(path=executable, command_prefix=(str(executable),)),
+        ast_grep_version="0.44.1",
+        config_path=None,
+        allowed_roots=(root,),
+        command_timeout_seconds=2.0,
+        default_max_results=default_max_results,
+        max_results_cap=max_results_cap,
+        forbid_regex_rules=forbid_regex_rules,
+    )
 
 
-# Patch the imports before loading main
-with patch("mcp.server.fastmcp.FastMCP", MockFastMCP):
-    with patch("pydantic.Field", mock_field):
-        import main
-        from main import (
-            format_matches_as_text,
-            parse_matches,
-            run_ast_grep,
-            run_command,
+def version_runner(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(arguments, 0, "ast-grep 0.44.1\n", "")
+
+
+def test_build_runtime_resolves_config_roots_and_version(tmp_path: Path) -> None:
+    executable = tmp_path / "ast-grep"
+    executable.write_text("test executable", encoding="utf-8")
+    executable.chmod(0o755)
+    config = tmp_path / "sgconfig.yml"
+    config.write_text("ruleDirs: []\n", encoding="utf-8")
+
+    runtime = build_runtime(
+        working_directory=tmp_path,
+        ast_grep_executable=str(executable),
+        config_path="sgconfig.yml",
+        allowed_roots=[str(tmp_path), str(tmp_path)],
+        command_timeout_seconds=5,
+        default_max_results=25,
+        max_results_cap=100,
+        forbid_regex_rules=True,
+        runner=version_runner,
+    )
+
+    assert runtime.config_path == config
+    assert runtime.allowed_roots == (tmp_path,)
+    assert runtime.ast_grep_version == "0.44.1"
+    assert runtime.default_max_results == 25
+    assert runtime.max_results_cap == 100
+    assert runtime.forbid_regex_rules is True
+
+
+def test_build_runtime_rejects_missing_executable(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="does not exist"):
+        build_runtime(
+            working_directory=tmp_path,
+            ast_grep_executable=str(tmp_path / "missing"),
         )
 
-        # Call register_mcp_tools to define the tool functions
-        main.register_mcp_tools()
 
-        # Extract the tool functions from the mocked mcp instance
-        dump_syntax_tree = main.mcp.tools.get("dump_syntax_tree")
-        find_code = main.mcp.tools.get("find_code")
-        find_code_by_rule = main.mcp.tools.get("find_code_by_rule")
-        match_code_rule = main.mcp.tools.get("test_match_code_rule")
-
-
-class TestDumpSyntaxTree:
-    """Test the dump_syntax_tree function"""
-
-    @patch("main.run_ast_grep")
-    def test_dump_syntax_tree_cst(self, mock_run):
-        """Test dumping CST format"""
-        mock_result = Mock()
-        mock_result.stderr = "ROOT@0..10"
-        mock_run.return_value = mock_result
-
-        result = dump_syntax_tree("const x = 1", "javascript", "cst")
-
-        assert result == "ROOT@0..10"
-        mock_run.assert_called_once_with(
-            "run",
-            ["--pattern", "const x = 1", "--lang", "javascript", "--debug-query=cst"],
+def test_build_runtime_rejects_wrong_executable(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="is not ast-grep"):
+        build_runtime(
+            working_directory=tmp_path,
+            ast_grep_executable=sys.executable,
         )
 
-    @patch("main.run_ast_grep")
-    def test_dump_syntax_tree_pattern(self, mock_run):
-        """Test dumping pattern format"""
-        mock_result = Mock()
-        mock_result.stderr = "pattern_node"
-        mock_run.return_value = mock_result
 
-        result = dump_syntax_tree("$VAR", "python", "pattern")
+def test_build_runtime_rejects_config_outside_allowed_root(tmp_path: Path) -> None:
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    config = tmp_path / "outside.yml"
+    config.write_text("ruleDirs: []\n", encoding="utf-8")
+    executable = allowed / "ast-grep"
+    executable.write_text("test executable", encoding="utf-8")
+    executable.chmod(0o755)
 
-        assert result == "pattern_node"
-        mock_run.assert_called_once_with("run", ["--pattern", "$VAR", "--lang", "python", "--debug-query=pattern"])
-
-
-class TestTestMatchCodeRule:
-    """Test the test_match_code_rule function"""
-
-    @patch("main.run_ast_grep")
-    def test_match_found(self, mock_run):
-        """Test when matches are found"""
-        mock_result = Mock()
-        mock_result.stdout = '[{"text": "def foo(): pass"}]'
-        mock_run.return_value = mock_result
-
-        yaml_rule = """id: test
-language: python
-rule:
-  pattern: 'def $NAME(): $$$'
-"""
-        code = "def foo(): pass"
-
-        result = match_code_rule(code, yaml_rule)
-
-        assert result == [{"text": "def foo(): pass"}]
-        mock_run.assert_called_once_with("scan", ["--inline-rules", yaml_rule, "--json", "--stdin"], input_text=code)
-
-    @patch("main.run_ast_grep")
-    def test_no_match(self, mock_run):
-        """Test when no matches are found"""
-        mock_result = Mock()
-        mock_result.stdout = "[]"
-        mock_run.return_value = mock_result
-
-        yaml_rule = """id: test
-language: python
-rule:
-  pattern: 'class $NAME'
-"""
-        code = "def foo(): pass"
-
-        with pytest.raises(ValueError, match="No matches found"):
-            match_code_rule(code, yaml_rule)
+    with pytest.raises(ValueError, match="Config path resolves outside"):
+        build_runtime(
+            working_directory=allowed,
+            ast_grep_executable=str(executable),
+            config_path=str(config),
+            allowed_roots=[str(allowed)],
+            runner=version_runner,
+        )
 
 
-class TestFindCode:
-    """Test the find_code function"""
+@pytest.mark.parametrize(
+    ("default_limit", "cap"),
+    [
+        pytest.param(0, 500, id="zero-default"),
+        pytest.param(51, 50, id="default-over-cap"),
+        pytest.param(1, 0, id="zero-cap"),
+        pytest.param(1, 501, id="cap-over-hard-limit"),
+    ],
+)
+def test_build_runtime_rejects_invalid_limits(tmp_path: Path, default_limit: int, cap: int) -> None:
+    executable = tmp_path / "ast-grep"
+    executable.write_text("test executable", encoding="utf-8")
+    executable.chmod(0o755)
 
-    @patch("main.run_ast_grep")
-    def test_text_format_with_results(self, mock_run):
-        """Test text format output with results"""
-        mock_result = Mock()
-        mock_matches = [
-            {"text": "def foo():\n    pass", "file": "file.py", "range": {"start": {"line": 0}, "end": {"line": 1}}},
-            {"text": "def bar():\n    return", "file": "file.py", "range": {"start": {"line": 4}, "end": {"line": 5}}},
-        ]
-        mock_result.stdout = "\n".join(json.dumps(m) for m in mock_matches)
-        mock_run.return_value = mock_result
+    with pytest.raises(ValueError):
+        build_runtime(
+            working_directory=tmp_path,
+            ast_grep_executable=str(executable),
+            default_max_results=default_limit,
+            max_results_cap=cap,
+            runner=version_runner,
+        )
 
-        result = find_code(
-            project_folder="/test/path",
-            pattern="def $NAME():",
+
+def test_resolve_ast_grep_executable_uses_node_for_npm_shim(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for this executable-resolution test")
+
+    package = tmp_path / "node_modules" / "@ast-grep" / "cli"
+    package.mkdir(parents=True)
+    target = package / "bin" / "ast-grep.js"
+    target.parent.mkdir()
+    target.write_text("console.log('ast-grep')\n", encoding="utf-8")
+    (package / "package.json").write_text(
+        json.dumps({"name": "@ast-grep/cli", "bin": {"ast-grep": "bin/ast-grep.js"}}),
+        encoding="utf-8",
+    )
+    shim = tmp_path / "node_modules" / ".bin" / "ast-grep"
+    shim.parent.mkdir(parents=True)
+    shim.write_text("shim", encoding="utf-8")
+
+    resolved = resolve_ast_grep_executable(str(shim), working_directory=tmp_path)
+
+    assert resolved.path == target
+    assert resolved.command_prefix == (str(Path(node).resolve()), str(target))
+
+
+def test_resolve_ast_grep_executable_uses_node_for_global_windows_npm_shim(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for this executable-resolution test")
+
+    package = tmp_path / "node_modules" / "@ast-grep" / "cli"
+    package.mkdir(parents=True)
+    target = package / "ast-grep.js"
+    target.write_text("console.log('ast-grep')\n", encoding="utf-8")
+    (package / "package.json").write_text(
+        json.dumps({"name": "@ast-grep/cli", "bin": "ast-grep.js"}),
+        encoding="utf-8",
+    )
+    shim = tmp_path / "ast-grep.cmd"
+    shim.write_text("@echo off\n", encoding="utf-8")
+
+    resolved = resolve_ast_grep_executable(str(shim), working_directory=tmp_path)
+
+    assert resolved.path == target
+    assert resolved.command_prefix == (str(Path(node).resolve()), str(target))
+
+
+def test_run_process_reports_timeout() -> None:
+    def timeout_runner(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(arguments, timeout=1)
+
+    with pytest.raises(RuntimeError, match="timed out after 1 seconds"):
+        run_process(["ast-grep", "--version"], timeout_seconds=1, runner=timeout_runner)
+
+
+def test_parse_stream_matches_rejects_non_json_output() -> None:
+    with pytest.raises(RuntimeError, match="invalid JSON"):
+        parse_stream_matches("not json")
+
+
+def test_validate_rule_yaml_accepts_structural_rule_and_negative_probe_shape() -> None:
+    validate_rule_yaml(
+        "id: calls\nlanguage: python\nrule:\n  pattern: print($A)\n",
+        forbid_regex_rules=True,
+    )
+
+
+def test_validate_rule_yaml_rejects_regex_matcher_when_policy_enabled() -> None:
+    with pytest.raises(ValueError, match="Regex ast-grep rules are disabled"):
+        validate_rule_yaml(
+            "id: text\nlanguage: python\nrule:\n  regex: secret.*\n",
+            forbid_regex_rules=True,
+        )
+
+
+def test_validate_rule_yaml_allows_regex_matcher_when_policy_disabled() -> None:
+    validate_rule_yaml(
+        "id: text\nlanguage: python\nrule:\n  regex: secret.*\n",
+        forbid_regex_rules=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "rule_yaml",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("- item\n", id="not-a-mapping"),
+        pytest.param("id: missing-fields\n", id="missing-fields"),
+        pytest.param("id: wrong-rule\nlanguage: python\nrule: value\n", id="rule-not-mapping"),
+    ],
+)
+def test_validate_rule_yaml_rejects_invalid_shapes(rule_yaml: str) -> None:
+    with pytest.raises(ValueError):
+        validate_rule_yaml(rule_yaml, forbid_regex_rules=False)
+
+
+def test_get_supported_languages_reads_custom_languages(tmp_path: Path) -> None:
+    config = tmp_path / "sgconfig.yml"
+    config.write_text("customLanguages:\n  templ: {}\n", encoding="utf-8")
+
+    languages = get_supported_languages(config)
+
+    assert "python" in languages
+    assert "templ" in languages
+
+
+def test_search_rejects_project_outside_allowed_root(tmp_path: Path) -> None:
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    outside.mkdir()
+    service = AstGrepService(make_runtime(allowed))
+
+    with pytest.raises(ValueError, match="Project folder resolves outside"):
+        service.find_code(
+            project_folder=str(outside),
+            pattern="print($A)",
             language="python",
-            output_format="text",
-        )
-
-        assert "Found 2 matches:" in result
-        assert "def foo():" in result
-        assert "def bar():" in result
-        assert "file.py:1-2" in result
-        assert "file.py:5-6" in result
-        mock_run.assert_called_once_with("run", ["--pattern", "def $NAME():", "--lang", "python", "--json=stream", "/test/path"])
-
-    @patch("main.run_ast_grep")
-    def test_text_format_no_results(self, mock_run):
-        """Test text format output with no results"""
-        mock_result = Mock()
-        mock_result.stdout = ""
-        mock_run.return_value = mock_result
-
-        result = find_code(project_folder="/test/path", pattern="nonexistent", output_format="text")
-
-        assert result == "No matches found"
-        mock_run.assert_called_once_with("run", ["--pattern", "nonexistent", "--json=stream", "/test/path"])
-
-    @patch("main.run_ast_grep")
-    def test_text_format_with_max_results(self, mock_run):
-        """Test text format with max_results limit"""
-        mock_result = Mock()
-        mock_matches = [
-            {"text": "match1", "file": "f.py", "range": {"start": {"line": 0}, "end": {"line": 0}}},
-            {"text": "match2", "file": "f.py", "range": {"start": {"line": 1}, "end": {"line": 1}}},
-            {"text": "match3", "file": "f.py", "range": {"start": {"line": 2}, "end": {"line": 2}}},
-            {"text": "match4", "file": "f.py", "range": {"start": {"line": 3}, "end": {"line": 3}}},
-        ]
-        mock_result.stdout = "\n".join(json.dumps(m) for m in mock_matches)
-        mock_run.return_value = mock_result
-
-        result = find_code(
-            project_folder="/test/path",
-            pattern="pattern",
-            max_results=2,
-            output_format="text",
-        )
-
-        assert "Found 2 matches (showing first 2 of 4):" in result
-        assert "match1" in result
-        assert "match2" in result
-        assert "match3" not in result
-
-    @patch("main.run_ast_grep")
-    def test_json_format(self, mock_run):
-        """Test JSON format output"""
-        mock_result = Mock()
-        mock_matches = [
-            {"text": "def foo():", "file": "test.py"},
-            {"text": "def bar():", "file": "test.py"},
-        ]
-        mock_result.stdout = "\n".join(json.dumps(m) for m in mock_matches)
-        mock_run.return_value = mock_result
-
-        result = find_code(project_folder="/test/path", pattern="def $NAME():", output_format="json")
-
-        assert result == mock_matches
-        mock_run.assert_called_once_with("run", ["--pattern", "def $NAME():", "--json=stream", "/test/path"])
-
-    @patch("main.run_ast_grep")
-    def test_json_format_with_max_results(self, mock_run):
-        """Test JSON format with max_results limit"""
-        mock_result = Mock()
-        mock_matches = [{"text": "match1"}, {"text": "match2"}, {"text": "match3"}]
-        mock_result.stdout = "\n".join(json.dumps(m) for m in mock_matches)
-        mock_run.return_value = mock_result
-
-        result = find_code(
-            project_folder="/test/path",
-            pattern="pattern",
-            max_results=2,
-            output_format="json",
-        )
-
-        assert len(result) == 2
-        assert result[0]["text"] == "match1"
-        assert result[1]["text"] == "match2"
-
-    def test_invalid_output_format(self):
-        """Test with invalid output format"""
-        with pytest.raises(ValueError, match="Invalid output_format"):
-            find_code(project_folder="/test/path", pattern="pattern", output_format="invalid")
-
-
-class TestFindCodeByRule:
-    """Test the find_code_by_rule function"""
-
-    @patch("main.run_ast_grep")
-    def test_text_format_with_results(self, mock_run):
-        """Test text format output with results"""
-        mock_result = Mock()
-        mock_matches = [
-            {"text": "class Foo:\n    pass", "file": "file.py", "range": {"start": {"line": 0}, "end": {"line": 1}}},
-            {"text": "class Bar:\n    pass", "file": "file.py", "range": {"start": {"line": 9}, "end": {"line": 10}}},
-        ]
-        mock_result.stdout = "\n".join(json.dumps(m) for m in mock_matches)
-        mock_run.return_value = mock_result
-
-        yaml_rule = """id: test
-language: python
-rule:
-  pattern: 'class $NAME'
-"""
-
-        result = find_code_by_rule(project_folder="/test/path", yaml=yaml_rule, output_format="text")
-
-        assert "Found 2 matches:" in result
-        assert "class Foo:" in result
-        assert "class Bar:" in result
-        assert "file.py:1-2" in result
-        assert "file.py:10-11" in result
-        mock_run.assert_called_once_with("scan", ["--inline-rules", yaml_rule, "--json=stream", "/test/path"])
-
-    @patch("main.run_ast_grep")
-    def test_json_format(self, mock_run):
-        """Test JSON format output"""
-        mock_result = Mock()
-        mock_matches = [{"text": "class Foo:", "file": "test.py"}]
-        mock_result.stdout = "\n".join(json.dumps(m) for m in mock_matches)
-        mock_run.return_value = mock_result
-
-        yaml_rule = """id: test
-language: python
-rule:
-  pattern: 'class $NAME'
-"""
-
-        result = find_code_by_rule(project_folder="/test/path", yaml=yaml_rule, output_format="json")
-
-        assert result == mock_matches
-        mock_run.assert_called_once_with("scan", ["--inline-rules", yaml_rule, "--json=stream", "/test/path"])
-
-
-class TestRunCommand:
-    """Test the run_command function"""
-
-    @patch("subprocess.run")
-    def test_successful_command(self, mock_run):
-        """Test successful command execution"""
-        mock_result = Mock()
-        mock_result.returncode = 0
-        mock_result.stdout = "output"
-        mock_run.return_value = mock_result
-
-        result = run_command(["echo", "test"])
-
-        assert result.stdout == "output"
-        mock_run.assert_called_once_with(["echo", "test"], capture_output=True, input=None, text=True, check=True, shell=False)
-
-    @patch("subprocess.run")
-    def test_command_failure(self, mock_run):
-        """Test command execution failure"""
-        mock_run.side_effect = subprocess.CalledProcessError(1, ["false"], stderr="error message")
-
-        with pytest.raises(Exception, match="failed with exit code 1"):
-            run_command(["false"])
-
-    @patch("subprocess.run")
-    def test_command_not_found(self, mock_run):
-        """Test when command is not found"""
-        mock_run.side_effect = FileNotFoundError()
-
-        with pytest.raises(RuntimeError, match="not found"):
-            run_command(["nonexistent"])
-
-
-class TestFormatMatchesAsText:
-    """Test the format_matches_as_text helper function"""
-
-    def test_empty_matches(self):
-        """Test with empty matches list"""
-        result = format_matches_as_text([])
-        assert result == ""
-
-    def test_single_line_match(self):
-        """Test formatting a single-line match"""
-        matches = [{"text": "const x = 1", "file": "test.js", "range": {"start": {"line": 4}, "end": {"line": 4}}}]
-        result = format_matches_as_text(matches)
-        assert result == "test.js:5\nconst x = 1"
-
-    def test_multi_line_match(self):
-        """Test formatting a multi-line match"""
-        matches = [{"text": "def foo():\n    return 42", "file": "test.py", "range": {"start": {"line": 9}, "end": {"line": 10}}}]
-        result = format_matches_as_text(matches)
-        assert result == "test.py:10-11\ndef foo():\n    return 42"
-
-    def test_multiple_matches(self):
-        """Test formatting multiple matches"""
-        matches = [
-            {"text": "match1", "file": "file1.py", "range": {"start": {"line": 0}, "end": {"line": 0}}},
-            {"text": "match2\nline2", "file": "file2.py", "range": {"start": {"line": 5}, "end": {"line": 6}}},
-        ]
-        result = format_matches_as_text(matches)
-        expected = "file1.py:1\nmatch1\n\nfile2.py:6-7\nmatch2\nline2"
-        assert result == expected
-
-
-class TestParseMatches:
-    """Test the parse_matches helper function"""
-
-    def test_empty_input(self):
-        """Test with empty string"""
-        matches, total = parse_matches("")
-        assert matches == []
-        assert total == 0
-
-    def test_normal_parsing(self):
-        """Test parsing JSONL output"""
-        lines = [
-            json.dumps({"text": "match1", "file": "a.py"}),
-            json.dumps({"text": "match2", "file": "b.py"}),
-        ]
-        matches, total = parse_matches("\n".join(lines))
-        assert len(matches) == 2
-        assert total == 2
-        assert matches[0]["text"] == "match1"
-        assert matches[1]["text"] == "match2"
-
-    def test_early_exit_with_max_results(self):
-        """Test that max_results limits parsed matches but counts all lines"""
-        lines = [
-            json.dumps({"text": f"match{i}"}) for i in range(5)
-        ]
-        matches, total = parse_matches("\n".join(lines), max_results=2)
-        assert len(matches) == 2
-        assert total == 5
-        assert matches[0]["text"] == "match0"
-        assert matches[1]["text"] == "match1"
-
-    def test_blank_lines_ignored(self):
-        """Test that blank lines are skipped"""
-        lines = [
-            json.dumps({"text": "match1"}),
-            "",
-            "  ",
-            json.dumps({"text": "match2"}),
-        ]
-        matches, total = parse_matches("\n".join(lines))
-        assert len(matches) == 2
-        assert total == 2
-
-    def test_non_json_lines_skipped(self):
-        """Test that non-JSON lines (e.g. warnings) are skipped without crashing"""
-        lines = [
-            "WARNING: some ast-grep warning",
-            json.dumps({"text": "match1"}),
-            "another warning line",
-            json.dumps({"text": "match2"}),
-        ]
-        matches, total = parse_matches("\n".join(lines))
-        assert len(matches) == 2
-        assert total == 2
-        assert matches[0]["text"] == "match1"
-
-    def test_non_json_lines_not_counted_with_max_results(self):
-        """Test that warning lines after max_results don't inflate total count"""
-        lines = [
-            json.dumps({"text": "match1"}),
-            json.dumps({"text": "match2"}),
-            "WARNING: something",
-            json.dumps({"text": "match3"}),
-        ]
-        matches, total = parse_matches("\n".join(lines), max_results=1)
-        assert len(matches) == 1
-        assert total == 3  # only JSON lines counted
-
-
-class TestRunAstGrep:
-    """Test the run_ast_grep function"""
-
-    @patch("main.run_command")
-    @patch("main.CONFIG_PATH", None)
-    def test_without_config(self, mock_run):
-        """Test running ast-grep without config"""
-        mock_result = Mock()
-        mock_run.return_value = mock_result
-
-        result = run_ast_grep("run", ["--pattern", "test"])
-
-        assert result == mock_result
-        mock_run.assert_called_once_with(["ast-grep", "run", "--pattern", "test"], None)
-
-    @patch("main.run_command")
-    @patch("main.CONFIG_PATH", "/path/to/config.yaml")
-    def test_with_config(self, mock_run):
-        """Test running ast-grep with config"""
-        mock_result = Mock()
-        mock_run.return_value = mock_result
-
-        result = run_ast_grep("scan", ["--inline-rules", "rule"])
-
-        assert result == mock_result
-        mock_run.assert_called_once_with(
-            [
-                "ast-grep",
-                "scan",
-                "--config",
-                "/path/to/config.yaml",
-                "--inline-rules",
-                "rule",
-            ],
-            None,
+            paths=None,
+            include_globs=None,
+            exclude_globs=None,
+            max_results=1,
         )
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+def test_search_rejects_parent_path_escape(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("print('outside')\n", encoding="utf-8")
+    service = AstGrepService(make_runtime(tmp_path))
+
+    with pytest.raises(ValueError, match="outside project_folder"):
+        service.find_code(
+            project_folder="project",
+            pattern="print($A)",
+            language="python",
+            paths=["../outside.py"],
+            include_globs=None,
+            exclude_globs=None,
+            max_results=1,
+        )
+
+
+def test_search_rejects_absolute_search_path(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "example.py"
+    source.write_text("print('value')\n", encoding="utf-8")
+    service = AstGrepService(make_runtime(tmp_path))
+
+    with pytest.raises(ValueError, match="must be relative"):
+        service.find_code(
+            project_folder="project",
+            pattern="print($A)",
+            language="python",
+            paths=[str(source)],
+            include_globs=None,
+            exclude_globs=None,
+            max_results=1,
+        )
+
+
+def test_search_rejects_symlink_escape(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("print('outside')\n", encoding="utf-8")
+    link = project / "linked.py"
+    try:
+        link.symlink_to(outside)
+    except OSError as error:
+        pytest.skip(f"Symlinks are unavailable: {error}")
+    service = AstGrepService(make_runtime(tmp_path))
+
+    with pytest.raises(ValueError, match="outside project_folder"):
+        service.find_code(
+            project_folder="project",
+            pattern="print($A)",
+            language="python",
+            paths=["linked.py"],
+            include_globs=None,
+            exclude_globs=None,
+            max_results=1,
+        )
+
+
+def test_search_uses_limit_plus_one_globs_and_relative_results(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    source = project / "src" / "example.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("print('one')\nprint('two')\n", encoding="utf-8")
+    matches = [
+        {
+            "file": str(source),
+            "text": "print('one')",
+            "range": {"start": {"line": 0}, "end": {"line": 0}},
+        },
+        {
+            "file": str(source),
+            "text": "print('two')",
+            "range": {"start": {"line": 1}, "end": {"line": 1}},
+        },
+    ]
+    runner = RecordingRunner(stdout="\n".join(json.dumps(match) for match in matches))
+    service = AstGrepService(make_runtime(tmp_path), runner=runner)
+
+    results = service.find_code(
+        project_folder="project",
+        pattern="print($A)",
+        language="python",
+        paths=["src"],
+        include_globs=["*.py"],
+        exclude_globs=["*_test.py"],
+        max_results=1,
+    )
+
+    assert results == {
+        "matches": [
+            {
+                "file": "src/example.py",
+                "text": "print('one')",
+                "range": {"start": {"line": 0}, "end": {"line": 0}},
+            }
+        ],
+        "returned": 1,
+        "truncated": True,
+        "limit": 1,
+    }
+    command = runner.calls[0][0]
+    assert command[1] == "scan"
+    assert command[command.index("--max-results") + 1] == "2"
+    assert [command[index + 1] for index, value in enumerate(command) if value == "--globs"] == ["*.py", "!*_test.py"]
+    assert command[-1] == str(source.parent)
+
+
+def test_search_rejects_zero_and_unlimited_limits(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = AstGrepService(make_runtime(tmp_path))
+
+    with pytest.raises(ValueError, match="between 1 and 500"):
+        service.find_code(
+            project_folder="project",
+            pattern="print($A)",
+            language="python",
+            paths=None,
+            include_globs=None,
+            exclude_globs=None,
+            max_results=0,
+        )
+
+
+def test_negative_rule_probe_returns_empty_list(tmp_path: Path) -> None:
+    runner = RecordingRunner(stdout="")
+    service = AstGrepService(make_runtime(tmp_path), runner=runner)
+
+    matches = service.test_match_code_rule(
+        code="value = 1",
+        rule_yaml="id: no-call\nlanguage: python\nrule:\n  pattern: print($A)\n",
+    )
+
+    assert matches == []
+    command = runner.calls[0][0]
+    assert command[1] == "scan"
+    assert "--stdin" in command
+    assert command[command.index("--max-results") + 1] == "500"
+
+
+def test_search_exit_one_with_error_is_not_treated_as_no_match(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    runner = RecordingRunner(stderr="invalid rule", returncode=1)
+    service = AstGrepService(make_runtime(tmp_path), runner=runner)
+
+    with pytest.raises(RuntimeError, match="search failed"):
+        service.find_code(
+            project_folder="project",
+            pattern="print($A)",
+            language="python",
+            paths=None,
+            include_globs=None,
+            exclude_globs=None,
+            max_results=1,
+        )
+
+
+def test_format_matches_and_truncation_header() -> None:
+    matches = [
+        {
+            "file": "src/example.py",
+            "text": "print('one')",
+            "range": {"start": {"line": 4}, "end": {"line": 4}},
+        }
+    ]
+
+    assert format_matches_as_text(matches) == "src/example.py:5\nprint('one')"
+    assert (
+        format_search_results({"matches": matches, "returned": 1, "truncated": True, "limit": 1})
+        == "Found 1 match (limit 1; additional matches exist):\n\nsrc/example.py:5\nprint('one')"
+    )
+
+
+def test_server_info_exposes_effective_contract(tmp_path: Path) -> None:
+    runtime = make_runtime(tmp_path, default_max_results=25, max_results_cap=100, forbid_regex_rules=True)
+
+    info = AstGrepService(runtime).get_server_info()
+
+    assert info["fork_version"] == "0.2.0"
+    assert info["ast_grep_version"] == "0.44.1"
+    assert info["allowed_roots"] == [str(tmp_path)]
+    assert info["default_max_results"] == 25
+    assert info["max_results_cap"] == 100
+    assert info["forbid_regex_rules"] is True
+    assert os.path.isabs(info["ast_grep_executable"])

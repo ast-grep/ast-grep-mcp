@@ -1,138 +1,177 @@
-"""Integration tests for ast-grep MCP server"""
+from __future__ import annotations
 
-import json
-import os
+import shutil
 import sys
-from unittest.mock import Mock, patch
+from pathlib import Path
 
 import pytest
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 
-# Add parent directory to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from main import AstGrepService, build_runtime
 
-
-# Mock FastMCP to disable decoration
-class MockFastMCP:
-    """Mock FastMCP that returns functions unchanged"""
-
-    def __init__(self, name):
-        self.name = name
-        self.tools = {}  # Store registered tools
-
-    def tool(self, **kwargs):
-        """Decorator that returns the function unchanged"""
-
-        def decorator(func):
-            # Store the function for later retrieval
-            self.tools[func.__name__] = func
-            return func  # Return original function without modification
-
-        return decorator
-
-    def run(self, **kwargs):
-        """Mock run method"""
-        pass
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
-# Mock the Field function to return the default value
-def mock_field(**kwargs):
-    return kwargs.get("default")
+def actual_service(root: Path, *, forbid_regex_rules: bool = False) -> AstGrepService:
+    executable = shutil.which("ast-grep")
+    if executable is None:
+        pytest.fail("ast-grep must be installed for integration tests")
+    runtime = build_runtime(
+        working_directory=root,
+        ast_grep_executable=executable,
+        allowed_roots=[str(root)],
+        forbid_regex_rules=forbid_regex_rules,
+    )
+    assert runtime.ast_grep_version == "0.44.1"
+    return AstGrepService(runtime)
 
 
-# Import with mocked decorators
-with patch("mcp.server.fastmcp.FastMCP", MockFastMCP):
-    with patch("pydantic.Field", mock_field):
-        import main
+def test_pattern_search_is_bounded_and_project_relative() -> None:
+    service = actual_service(REPOSITORY_ROOT)
 
-        # Call register_mcp_tools to define the tool functions
-        main.register_mcp_tools()
+    result = service.find_code(
+        project_folder=str(FIXTURES),
+        pattern="def $NAME($$$): $$$BODY",
+        language="python",
+        paths=["example.py"],
+        include_globs=None,
+        exclude_globs=None,
+        max_results=1,
+    )
 
-        # Extract the tool functions from the mocked mcp instance
-        find_code = main.mcp.tools.get("find_code")
-        find_code_by_rule = main.mcp.tools.get("find_code_by_rule")
+    assert result["returned"] == 1
+    assert result["truncated"] is True
+    assert result["limit"] == 1
+    assert result["matches"][0]["file"] == "example.py"
+    assert "def hello" in result["matches"][0]["text"]
 
 
-@pytest.fixture
-def fixtures_dir():
-    """Get the path to the fixtures directory"""
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "fixtures"))
+def test_rule_search_honors_include_and_exclude_globs(tmp_path: Path) -> None:
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "keep.py").write_text("print('keep')\n", encoding="utf-8")
+    (source / "skip_test.py").write_text("print('skip')\n", encoding="utf-8")
+    service = actual_service(tmp_path)
+
+    result = service.find_code_by_rule(
+        project_folder=str(tmp_path),
+        rule_yaml="id: print-calls\nlanguage: python\nrule:\n  pattern: print($A)\n",
+        paths=["src"],
+        include_globs=["**/*.py"],
+        exclude_globs=["**/*_test.py"],
+        max_results=10,
+    )
+
+    assert result["returned"] == 1
+    assert result["truncated"] is False
+    assert result["matches"][0]["file"] == "src/keep.py"
 
 
-class TestIntegration:
-    """Integration tests for ast-grep MCP functions"""
+def test_valid_negative_probe_returns_empty_matches() -> None:
+    service = actual_service(REPOSITORY_ROOT)
 
-    def test_find_code_text_format(self, fixtures_dir):
-        """Test find_code with text format"""
-        result = find_code(
-            project_folder=fixtures_dir,
-            pattern="def $NAME($$$)",
-            language="python",
-            output_format="text",
+    matches = service.test_match_code_rule(
+        code="value = 1",
+        rule_yaml="id: no-call\nlanguage: python\nrule:\n  pattern: print($A)\n",
+    )
+
+    assert matches == []
+
+
+def test_regex_policy_rejects_regex_rule_before_ast_grep_runs() -> None:
+    service = actual_service(REPOSITORY_ROOT, forbid_regex_rules=True)
+
+    with pytest.raises(ValueError, match="Regex ast-grep rules are disabled"):
+        service.test_match_code_rule(
+            code="value = 1",
+            rule_yaml="id: regex\nlanguage: python\nrule:\n  regex: value.*\n",
         )
 
-        assert "hello" in result
-        assert "add" in result
-        assert "Found" in result and "matches" in result
 
-    def test_find_code_json_format(self, fixtures_dir):
-        """Test find_code with JSON format"""
-        result = find_code(
-            project_folder=fixtures_dir,
-            pattern="def $NAME($$$)",
-            language="python",
-            output_format="json",
-        )
+@pytest.mark.asyncio
+async def test_stdio_protocol_catalog_annotations_metadata_and_search_contract() -> None:
+    executable = shutil.which("ast-grep")
+    if executable is None:
+        pytest.fail("ast-grep must be installed for protocol tests")
+    parameters = StdioServerParameters(
+        command=sys.executable,
+        args=[
+            str(REPOSITORY_ROOT / "main.py"),
+            "--ast-grep",
+            executable,
+            "--allowed-root",
+            str(REPOSITORY_ROOT),
+            "--forbid-regex-rules",
+        ],
+        cwd=REPOSITORY_ROOT,
+    )
 
-        assert len(result) >= 2
-        assert any("hello" in str(match) for match in result)
-        assert any("add" in str(match) for match in result)
+    async with stdio_client(parameters) as streams:
+        async with ClientSession(*streams) as session:
+            await session.initialize()
+            listed = await session.list_tools()
+            tools = {tool.name: tool for tool in listed.tools}
+            assert set(tools) == {
+                "dump_syntax_tree",
+                "test_match_code_rule",
+                "find_code",
+                "find_code_by_rule",
+                "get_server_info",
+            }
+            for tool in tools.values():
+                assert tool.annotations is not None
+                assert tool.annotations.readOnlyHint is True
+                assert tool.annotations.destructiveHint is False
+                assert tool.annotations.idempotentHint is True
+                assert tool.annotations.openWorldHint is False
 
-    @patch("main.run_ast_grep")
-    def test_find_code_by_rule(self, mock_run, fixtures_dir):
-        """Test find_code_by_rule with mocked ast-grep"""
-        # Mock the response with JSONL format (since we always use --json=stream internally)
-        mock_result = Mock()
-        mock_matches = [
-            {"text": "class Calculator:\n    pass", "file": "fixtures/example.py", "range": {"start": {"line": 6}, "end": {"line": 7}}}
-        ]
-        mock_result.stdout = "\n".join(json.dumps(m) for m in mock_matches)
-        mock_run.return_value = mock_result
+            find_schema = tools["find_code"].inputSchema
+            assert {"project_folder", "pattern", "language"}.issubset(find_schema["required"])
 
-        yaml_rule = """id: test
-language: python
-rule:
-  pattern: class $NAME"""
+            info_result = await session.call_tool("get_server_info", {})
+            assert info_result.isError is False
+            assert info_result.structuredContent is not None
+            assert info_result.structuredContent["fork_version"] == "0.2.0"
+            assert info_result.structuredContent["ast_grep_version"] == "0.44.1"
+            assert info_result.structuredContent["forbid_regex_rules"] is True
+            assert info_result.structuredContent["default_max_results"] == 50
+            assert info_result.structuredContent["max_results_cap"] == 500
 
-        result = find_code_by_rule(project_folder=fixtures_dir, yaml=yaml_rule, output_format="text")
+            negative = await session.call_tool(
+                "test_match_code_rule",
+                {
+                    "code": "value = 1",
+                    "yaml": "id: no-call\nlanguage: python\nrule:\n  pattern: print($A)\n",
+                },
+            )
+            assert negative.isError is False
+            assert negative.structuredContent == {"result": []}
 
-        assert "Calculator" in result
-        assert "Found 1 match" in result
-        assert "fixtures/example.py:7-8" in result
+            found = await session.call_tool(
+                "find_code",
+                {
+                    "project_folder": str(FIXTURES),
+                    "pattern": "def $NAME($$$): $$$BODY",
+                    "language": "python",
+                    "paths": ["example.py"],
+                    "max_results": 1,
+                    "output_format": "json",
+                },
+            )
+            assert found.isError is False
+            assert found.structuredContent is not None
+            assert set(found.structuredContent) == {"matches", "returned", "truncated", "limit"}
+            assert found.structuredContent["returned"] == 1
+            assert found.structuredContent["truncated"] is True
+            assert found.structuredContent["limit"] == 1
 
-        # Verify the command was called correctly
-        mock_run.assert_called_once_with("scan", ["--inline-rules", yaml_rule, "--json=stream", fixtures_dir])
-
-    def test_find_code_with_max_results(self, fixtures_dir):
-        """Test find_code with max_results parameter"""
-        result = find_code(
-            project_folder=fixtures_dir,
-            pattern="def $NAME($$$)",
-            language="python",
-            max_results=1,
-            output_format="text",
-        )
-
-        # The new format says "showing first X of Y" instead of "limited to X"
-        assert "showing first 1 of" in result or "Found 1 match" in result
-        # Should only have one match in the output
-        assert result.count("def ") == 1
-
-    def test_find_code_no_matches(self, fixtures_dir):
-        """Test find_code when no matches are found"""
-        result = find_code(
-            project_folder=fixtures_dir,
-            pattern="nonexistent_pattern_xyz",
-            output_format="text",
-        )
-
-        assert result == "No matches found"
+            rejected = await session.call_tool(
+                "find_code_by_rule",
+                {
+                    "project_folder": str(FIXTURES),
+                    "yaml": "id: regex\nlanguage: python\nrule:\n  regex: value.*\n",
+                },
+            )
+            assert rejected.isError is True

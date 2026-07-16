@@ -8,6 +8,8 @@ wheels/
 
 # MyPy. Ruff, PyTest cache folders
 .*_cache/
+.coverage
+.coverage.*
 
 # Virtual environments
 .venv

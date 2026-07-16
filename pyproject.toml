@@ -1,13 +1,17 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "sg-mcp"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "A bounded, read-only ast-grep MCP server"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "pydantic>=2.11.0",
-    "mcp[cli]>=1.6.0",
-    "pyyaml>=6.0.2",
+    "mcp[cli]==1.27.2",
+    "pydantic>=2.11.0,<3",
+    "pyyaml>=6.0.2,<7",
 ]
 
 [project.optional-dependencies]
@@ -15,6 +19,7 @@ dev = [
     "pytest>=8.0.0",
     "pytest-cov>=5.0.0",
     "pytest-mock>=3.14.0",
+    "pytest-asyncio>=1.0.0",
     "ruff>=0.7.0",
     "mypy>=1.13.0",
     "types-pyyaml>=6.0.12.20250809",
@@ -23,12 +28,16 @@ dev = [
 [project.scripts]
 ast-grep-server = "main:run_mcp_server"
 
+[tool.setuptools]
+py-modules = ["main"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v"
+asyncio_mode = "auto"
 
 [tool.coverage.run]
 source = ["main"]
@@ -49,7 +58,7 @@ line-length = 140
 target-version = "py313"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "W"]
+select = ["B", "E", "F", "I", "N", "RUF", "UP", "W"]
 
 [tool.mypy]
 python_version = "3.13"
@@ -57,4 +66,3 @@ warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
 ignore_missing_imports = true
-

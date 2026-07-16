@@ -41,12 +41,12 @@ jobs:
 
     - name: Install ast-grep
       run: |
-        npm install -g @ast-grep/cli
+        npm install -g @ast-grep/cli@0.44.1
         ast-grep --version
 
     - name: Install dependencies
       run: |
-        uv sync --all-extras --dev
+        uv sync --frozen --all-extras --dev
 
     - name: Lint with ruff
       run: |
@@ -55,11 +55,14 @@ jobs:
     - name: Format check with ruff
       run: |
         uv run ruff format --check .
-      continue-on-error: true  # TODO
 
     - name: Type check with mypy
       run: |
         uv run mypy main.py
+
+    - name: Smoke test packaged entry point
+      run: |
+        uv run ast-grep-server --help
 
     - name: Run unit tests
       run: |
