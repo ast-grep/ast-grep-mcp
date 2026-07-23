@@ -14,10 +14,11 @@ from main import (
     AstGrepService,
     ResolvedExecutable,
     ServerRuntime,
+    _requires_node,
+    build_argument_parser,
     build_runtime,
     format_matches_as_text,
     format_search_results,
-    get_supported_languages,
     parse_stream_matches,
     resolve_ast_grep_executable,
     run_process,
@@ -150,6 +151,52 @@ def test_build_runtime_rejects_invalid_limits(tmp_path: Path, default_limit: int
         )
 
 
+@pytest.mark.parametrize(
+    ("environment_name", "option"),
+    [
+        pytest.param("AST_GREP_COMMAND_TIMEOUT", "--command-timeout", id="timeout"),
+        pytest.param("AST_GREP_DEFAULT_MAX_RESULTS", "--default-max-results", id="default-limit"),
+        pytest.param("AST_GREP_MAX_RESULTS_CAP", "--max-results-cap", id="limit-cap"),
+    ],
+)
+def test_argument_parser_reports_invalid_numeric_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    environment_name: str,
+    option: str,
+) -> None:
+    monkeypatch.setenv(environment_name, "")
+
+    with pytest.raises(SystemExit) as error:
+        build_argument_parser().parse_args([])
+
+    assert error.value.code == 2
+    assert f"argument {option}: invalid" in capsys.readouterr().err
+
+
+def test_argument_parser_coerces_numeric_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AST_GREP_COMMAND_TIMEOUT", "1.5")
+    monkeypatch.setenv("AST_GREP_DEFAULT_MAX_RESULTS", "25")
+    monkeypatch.setenv("AST_GREP_MAX_RESULTS_CAP", "100")
+
+    arguments = build_argument_parser().parse_args([])
+
+    assert arguments.command_timeout == 1.5
+    assert arguments.default_max_results == 25
+    assert arguments.max_results_cap == 100
+
+
+def test_requires_node_closes_executable(mocker: Any) -> None:
+    handle = mocker.MagicMock()
+    handle.__enter__.return_value = handle
+    handle.readline.return_value = b"#!/usr/bin/env node\n"
+    open_executable = mocker.patch.object(Path, "open", return_value=handle)
+
+    assert _requires_node(Path("ast-grep")) is True
+    open_executable.assert_called_once_with("rb")
+    handle.__exit__.assert_called_once_with(None, None, None)
+
+
 def test_resolve_ast_grep_executable_uses_node_for_npm_shim(tmp_path: Path) -> None:
     node = shutil.which("node")
     if node is None:
@@ -265,14 +312,23 @@ def test_validate_rule_yaml_rejects_invalid_shapes(rule_yaml: str) -> None:
         validate_rule_yaml(rule_yaml, forbid_regex_rules=False)
 
 
-def test_get_supported_languages_reads_custom_languages(tmp_path: Path) -> None:
-    config = tmp_path / "sgconfig.yml"
-    config.write_text("customLanguages:\n  templ: {}\n", encoding="utf-8")
+@pytest.mark.parametrize("language", ["py", "js", "ts", "hcl"])
+def test_dump_syntax_tree_accepts_cli_language_alias(tmp_path: Path, language: str) -> None:
+    runner = RecordingRunner(stderr="Debug Pattern:\nidentifier", returncode=1)
+    service = AstGrepService(make_runtime(tmp_path), runner=runner)
 
-    languages = get_supported_languages(config)
+    result = service.dump_syntax_tree(code="$A", language=language, format="pattern")
 
-    assert "python" in languages
-    assert "templ" in languages
+    assert result == "Debug Pattern:\nidentifier"
+    command = runner.calls[0][0]
+    assert command[command.index("--lang") + 1] == language
+
+
+def test_dump_syntax_tree_preserves_debug_output_when_pattern_has_no_match(tmp_path: Path) -> None:
+    runner = RecordingRunner(stderr="Debug Pattern:\ncall", returncode=1)
+    service = AstGrepService(make_runtime(tmp_path), runner=runner)
+
+    assert service.dump_syntax_tree(code="missing($A)", language="python", format="pattern") == "Debug Pattern:\ncall"
 
 
 def test_search_rejects_project_outside_allowed_root(tmp_path: Path) -> None:
@@ -330,6 +386,26 @@ def test_search_rejects_absolute_search_path(tmp_path: Path) -> None:
             exclude_globs=None,
             max_results=1,
         )
+
+
+def test_search_rejects_explicit_empty_paths(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    runner = RecordingRunner()
+    service = AstGrepService(make_runtime(tmp_path), runner=runner)
+
+    with pytest.raises(ValueError, match="at least one relative path"):
+        service.find_code(
+            project_folder="project",
+            pattern="print($A)",
+            language="python",
+            paths=[],
+            include_globs=None,
+            exclude_globs=None,
+            max_results=1,
+        )
+
+    assert runner.calls == []
 
 
 def test_search_rejects_symlink_escape(tmp_path: Path) -> None:

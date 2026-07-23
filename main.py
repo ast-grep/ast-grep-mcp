@@ -6,9 +6,11 @@ import os
 import shutil
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Annotated, Any, Final, Literal, TypedDict
 
 import yaml as yaml_parser
@@ -20,35 +22,7 @@ DEFAULT_MAX_RESULTS: Final = 50
 HARD_MAX_RESULTS: Final = 500
 DEFAULT_COMMAND_TIMEOUT_SECONDS: Final = 30.0
 FALLBACK_SERVER_VERSION: Final = "0.2.0"
-
-BUILTIN_LANGUAGES: Final = (
-    "bash",
-    "c",
-    "cpp",
-    "csharp",
-    "css",
-    "elixir",
-    "go",
-    "haskell",
-    "html",
-    "java",
-    "javascript",
-    "json",
-    "jsx",
-    "kotlin",
-    "lua",
-    "nix",
-    "php",
-    "python",
-    "ruby",
-    "rust",
-    "scala",
-    "solidity",
-    "swift",
-    "tsx",
-    "typescript",
-    "yaml",
-)
+NEUTRAL_AST_GREP_CONFIG: Final = "ruleDirs: []\n"
 
 DumpFormat = Literal["pattern", "cst", "ast"]
 OutputFormat = Literal["text", "json"]
@@ -203,7 +177,8 @@ def _requires_node(executable: Path) -> bool:
     if executable.suffix.lower() in {".cjs", ".js", ".mjs"}:
         return True
     try:
-        first_line = executable.open("rb").readline(256)
+        with executable.open("rb") as executable_file:
+            first_line = executable_file.readline(256)
     except OSError:
         return False
     return first_line.startswith(b"#!") and b"node" in first_line.lower()
@@ -353,27 +328,6 @@ def build_runtime(
     )
 
 
-def get_supported_languages(config_path: Path | None = None) -> list[str]:
-    languages = set(BUILTIN_LANGUAGES)
-    if config_path is None:
-        return sorted(languages)
-
-    try:
-        config = yaml_parser.safe_load(config_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, yaml_parser.YAMLError) as error:
-        raise ValueError(f"Unable to read ast-grep config: {config_path}") from error
-    if config is None:
-        return sorted(languages)
-    if not isinstance(config, Mapping):
-        raise ValueError(f"ast-grep config must contain a YAML mapping: {config_path}")
-    custom_languages = config.get("customLanguages")
-    if custom_languages is not None:
-        if not isinstance(custom_languages, Mapping):
-            raise ValueError("customLanguages must be a mapping")
-        languages.update(str(name) for name in custom_languages)
-    return sorted(languages)
-
-
 def _contains_mapping_key(value: Any, forbidden_key: str) -> bool:
     if isinstance(value, Mapping):
         return any(key == forbidden_key or _contains_mapping_key(item, forbidden_key) for key, item in value.items())
@@ -468,28 +422,38 @@ class AstGrepService:
         input_text: str | None = None,
         working_directory: Path | None = None,
         allow_no_matches: bool = False,
+        allow_stderr_on_no_matches: bool = False,
     ) -> CompletedTextProcess:
-        command = [*self.runtime.executable.command_prefix, subcommand]
-        if self.runtime.config_path is not None:
-            command.extend(["--config", str(self.runtime.config_path)])
-        command.extend(arguments)
-        result = run_process(
-            command,
-            timeout_seconds=self.runtime.command_timeout_seconds,
-            input_text=input_text,
-            working_directory=working_directory or self.runtime.working_directory,
-            allowed_exit_codes=frozenset({0, 1}) if allow_no_matches else frozenset({0}),
-            runner=self.runner,
-        )
-        if result.returncode == 1 and result.stderr.strip() and not result.stdout.strip():
+        with ExitStack() as stack:
+            config_path = self.runtime.config_path
+            if config_path is None:
+                temporary_directory = Path(stack.enter_context(TemporaryDirectory(prefix="ast-grep-mcp-")))
+                config_path = temporary_directory / "sgconfig.yml"
+                config_path.write_text(NEUTRAL_AST_GREP_CONFIG, encoding="utf-8")
+
+            command = [
+                *self.runtime.executable.command_prefix,
+                subcommand,
+                "--config",
+                str(config_path),
+                *arguments,
+            ]
+            result = run_process(
+                command,
+                timeout_seconds=self.runtime.command_timeout_seconds,
+                input_text=input_text,
+                working_directory=working_directory or self.runtime.working_directory,
+                allowed_exit_codes=frozenset({0, 1}) if allow_no_matches else frozenset({0}),
+                runner=self.runner,
+            )
+        if result.returncode == 1 and result.stderr.strip() and not result.stdout.strip() and not allow_stderr_on_no_matches:
             raise RuntimeError(f"ast-grep search failed: {_bounded_error_text(result.stderr)}")
         return result
 
-    def _validate_language(self, language: str) -> None:
+    @staticmethod
+    def _require_language(language: str) -> None:
         if not language:
             raise ValueError("language is required")
-        if language not in get_supported_languages(self.runtime.config_path):
-            raise ValueError(f"Unsupported ast-grep language: {language}")
 
     def _resolve_project(self, project_folder: str) -> Path:
         project = _resolve_existing_path(
@@ -501,7 +465,7 @@ class AstGrepService:
         return project
 
     def _resolve_paths(self, project: Path, raw_paths: Sequence[str] | None) -> list[Path]:
-        paths = list(raw_paths or ["."])
+        paths = ["."] if raw_paths is None else list(raw_paths)
         if not paths:
             raise ValueError("paths must contain at least one relative path")
         resolved_paths: list[Path] = []
@@ -595,11 +559,12 @@ class AstGrepService:
         }
 
     def dump_syntax_tree(self, *, code: str, language: str, format: DumpFormat) -> str:
-        self._validate_language(language)
+        self._require_language(language)
         result = self._run(
             "run",
             ["--pattern", code, "--lang", language, f"--debug-query={format}"],
             allow_no_matches=True,
+            allow_stderr_on_no_matches=True,
         )
         return result.stderr.strip()
 
@@ -631,7 +596,7 @@ class AstGrepService:
         exclude_globs: Sequence[str] | None,
         max_results: int | None,
     ) -> SearchResults:
-        self._validate_language(language)
+        self._require_language(language)
         rule_yaml = yaml_parser.safe_dump(
             {
                 "id": "mcp-pattern-search",
@@ -854,21 +819,21 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--command-timeout",
         type=float,
-        default=float(os.environ.get("AST_GREP_COMMAND_TIMEOUT", DEFAULT_COMMAND_TIMEOUT_SECONDS)),
+        default=os.environ.get("AST_GREP_COMMAND_TIMEOUT", str(DEFAULT_COMMAND_TIMEOUT_SECONDS)),
         metavar="SECONDS",
         help="Timeout for each ast-grep subprocess",
     )
     parser.add_argument(
         "--default-max-results",
         type=int,
-        default=int(os.environ.get("AST_GREP_DEFAULT_MAX_RESULTS", DEFAULT_MAX_RESULTS)),
+        default=os.environ.get("AST_GREP_DEFAULT_MAX_RESULTS", str(DEFAULT_MAX_RESULTS)),
         metavar="COUNT",
         help="Default finite search result limit",
     )
     parser.add_argument(
         "--max-results-cap",
         type=int,
-        default=int(os.environ.get("AST_GREP_MAX_RESULTS_CAP", HARD_MAX_RESULTS)),
+        default=os.environ.get("AST_GREP_MAX_RESULTS_CAP", str(HARD_MAX_RESULTS)),
         metavar="COUNT",
         help=f"Maximum allowed result limit (never above {HARD_MAX_RESULTS})",
     )

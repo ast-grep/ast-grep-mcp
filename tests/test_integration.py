@@ -69,6 +69,28 @@ def test_rule_search_honors_include_and_exclude_globs(tmp_path: Path) -> None:
     assert result["matches"][0]["file"] == "src/keep.py"
 
 
+def test_search_does_not_load_implicit_project_config(tmp_path: Path) -> None:
+    (tmp_path / "sgconfig.yml").write_text(
+        'ruleDirs: []\nlanguageGlobs:\n  Python:\n    - "*.txt"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "sample.txt").write_text("print('implicit')\n", encoding="utf-8")
+    service = actual_service(tmp_path)
+
+    result = service.find_code(
+        project_folder=str(tmp_path),
+        pattern="print($A)",
+        language="python",
+        paths=["."],
+        include_globs=None,
+        exclude_globs=None,
+        max_results=10,
+    )
+
+    assert result["returned"] == 0
+    assert result["matches"] == []
+
+
 def test_valid_negative_probe_returns_empty_matches() -> None:
     service = actual_service(REPOSITORY_ROOT)
 
