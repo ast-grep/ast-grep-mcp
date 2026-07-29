@@ -51,7 +51,7 @@ def make_runtime(
     return ServerRuntime(
         working_directory=root,
         executable=ResolvedExecutable(path=executable, command_prefix=(str(executable),)),
-        ast_grep_version="0.44.1",
+        ast_grep_version="0.45.0",
         config_path=None,
         allowed_roots=(root,),
         command_timeout_seconds=2.0,
@@ -62,7 +62,7 @@ def make_runtime(
 
 
 def version_runner(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess(arguments, 0, "ast-grep 0.44.1\n", "")
+    return subprocess.CompletedProcess(arguments, 0, "ast-grep 0.45.0\n", "")
 
 
 def test_build_runtime_resolves_config_roots_and_version(tmp_path: Path) -> None:
@@ -86,7 +86,7 @@ def test_build_runtime_resolves_config_roots_and_version(tmp_path: Path) -> None
 
     assert runtime.config_path == config
     assert runtime.allowed_roots == (tmp_path,)
-    assert runtime.ast_grep_version == "0.44.1"
+    assert runtime.ast_grep_version == "0.45.0"
     assert runtime.default_max_results == 25
     assert runtime.max_results_cap == 100
     assert runtime.forbid_regex_rules is True
@@ -105,6 +105,22 @@ def test_build_runtime_rejects_wrong_executable(tmp_path: Path) -> None:
         build_runtime(
             working_directory=tmp_path,
             ast_grep_executable=sys.executable,
+        )
+
+
+def test_build_runtime_rejects_ast_grep_version_drift(tmp_path: Path) -> None:
+    executable = tmp_path / "ast-grep"
+    executable.write_text("test executable", encoding="utf-8")
+    executable.chmod(0o755)
+
+    def drifted_version_runner(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(arguments, 0, "ast-grep 0.45.1\n", "")
+
+    with pytest.raises(ValueError, match="expected 0.45.0"):
+        build_runtime(
+            working_directory=tmp_path,
+            ast_grep_executable=str(executable),
+            runner=drifted_version_runner,
         )
 
 
@@ -554,7 +570,7 @@ def test_server_info_exposes_effective_contract(tmp_path: Path) -> None:
     info = AstGrepService(runtime).get_server_info()
 
     assert info["fork_version"] == "0.2.0"
-    assert info["ast_grep_version"] == "0.44.1"
+    assert info["ast_grep_version"] == "0.45.0"
     assert info["allowed_roots"] == [str(tmp_path)]
     assert info["default_max_results"] == 25
     assert info["max_results_cap"] == 100

@@ -24,7 +24,7 @@ def actual_service(root: Path, *, forbid_regex_rules: bool = False) -> AstGrepSe
         allowed_roots=[str(root)],
         forbid_regex_rules=forbid_regex_rules,
     )
-    assert runtime.ast_grep_version == "0.44.1"
+    assert runtime.ast_grep_version == "0.45.0"
     return AstGrepService(runtime)
 
 
@@ -156,7 +156,7 @@ async def test_stdio_protocol_catalog_annotations_metadata_and_search_contract()
             assert info_result.isError is False
             assert info_result.structuredContent is not None
             assert info_result.structuredContent["fork_version"] == "0.2.0"
-            assert info_result.structuredContent["ast_grep_version"] == "0.44.1"
+            assert info_result.structuredContent["ast_grep_version"] == "0.45.0"
             assert info_result.structuredContent["forbid_regex_rules"] is True
             assert info_result.structuredContent["default_max_results"] == 50
             assert info_result.structuredContent["max_results_cap"] == 500

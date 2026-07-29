@@ -23,6 +23,7 @@ HARD_MAX_RESULTS: Final = 500
 DEFAULT_COMMAND_TIMEOUT_SECONDS: Final = 30.0
 FALLBACK_SERVER_VERSION: Final = "0.2.0"
 NEUTRAL_AST_GREP_CONFIG: Final = "ruleDirs: []\n"
+SUPPORTED_AST_GREP_VERSION: Final = "0.45.0"
 
 DumpFormat = Literal["pattern", "cst", "ast"]
 OutputFormat = Literal["text", "json"]
@@ -279,7 +280,10 @@ def _read_ast_grep_version(
     parts = result.stdout.strip().split()
     if len(parts) < 2 or parts[0] != "ast-grep":
         raise ValueError(f"Configured executable is not ast-grep: {_bounded_error_text(result.stdout)}")
-    return parts[1]
+    executable_version = parts[1]
+    if executable_version != SUPPORTED_AST_GREP_VERSION:
+        raise ValueError(f"Unsupported ast-grep version {executable_version}; expected {SUPPORTED_AST_GREP_VERSION}")
+    return executable_version
 
 
 def build_runtime(

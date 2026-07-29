@@ -8,12 +8,12 @@ The server is designed for model-facing exploration: inspect syntax, test a rule
 
 - Python 3.13 or newer
 - [uv](https://docs.astral.sh/uv/)
-- ast-grep 0.44.1 for the tested integration contract
+- ast-grep 0.45.0 (the server rejects version drift)
 
 Install the tested ast-grep CLI with npm:
 
 ```bash
-npm install --global @ast-grep/cli@0.44.1
+npm install --global @ast-grep/cli@0.45.0
 ast-grep --version
 ```
 
@@ -120,6 +120,6 @@ uv run mypy main.py
 uv run pytest
 ```
 
-The integration suite launches the real STDIO server, negotiates MCP, inspects the exact tool catalog and annotations, calls metadata and search tools, and verifies ast-grep 0.44.1.
+The integration suite launches the real STDIO server, negotiates MCP, inspects the exact tool catalog and annotations, calls metadata and search tools, and verifies ast-grep 0.45.0.
 
 For rule design, follow ast-grep's [AI prompting workflow](https://astgrep.com/advanced/prompting.html), [rule testing guidance](https://astgrep.com/guide/test-rule.html), and [rewriting guide](https://astgrep.com/guide/rewrite-code.html). Rewriting is intentionally outside this MCP server.
