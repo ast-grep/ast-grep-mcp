@@ -12,6 +12,7 @@ import shutil
 import signal
 import struct
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -320,7 +321,8 @@ def _requires_node(executable: Path) -> bool:
 
 def resolve_ast_grep_executable(raw_executable: str, *, working_directory: Path) -> ResolvedExecutable:
     raw_path = Path(raw_executable).expanduser()
-    has_path_separator = os.sep in raw_executable or (os.altsep is not None and os.altsep in raw_executable)
+    alternate_separator = cast(str | None, getattr(os, "altsep", None))
+    has_path_separator = os.sep in raw_executable or (alternate_separator is not None and alternate_separator in raw_executable)
     if raw_path.is_absolute() or has_path_separator:
         shim_path = raw_path if raw_path.is_absolute() else working_directory / raw_path
         if not shim_path.exists():
@@ -1272,10 +1274,9 @@ def _terminate_and_reap(process: subprocess.Popen[Any]) -> None:
             return
         time.sleep(0.01)
 
-    if os.name == "posix" and signaled_group:
-        forceful_signal = signal.SIGKILL if hasattr(signal, "SIGKILL") else signal.SIGTERM
+    if sys.platform != "win32" and signaled_group:
         try:
-            _signal_process_group(process.pid, forceful_signal)
+            _signal_process_group(process.pid, signal.SIGKILL)
         except OSError:
             pass
     if process.poll() is None:
