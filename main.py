@@ -1273,8 +1273,9 @@ def _terminate_and_reap(process: subprocess.Popen[Any]) -> None:
         time.sleep(0.01)
 
     if os.name == "posix" and signaled_group:
+        forceful_signal = signal.SIGKILL if hasattr(signal, "SIGKILL") else signal.SIGTERM
         try:
-            _signal_process_group(process.pid, signal.SIGKILL)
+            _signal_process_group(process.pid, forceful_signal)
         except OSError:
             pass
     if process.poll() is None:
