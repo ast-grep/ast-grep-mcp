@@ -1,6 +1,9 @@
 # https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions
 name: Tests
 
+permissions:
+  contents: read
+
 on:  # https://docs.github.com/en/actions/reference/events-that-trigger-workflows
   push:
     branches:
@@ -39,35 +42,58 @@ jobs:
     - name: Set up Python
       run: uv python install
 
-    - name: Install ast-grep
-      run: |
-        npm install -g @ast-grep/cli@0.44.1
-        ast-grep --version
-
     - name: Install dependencies
       run: |
         uv sync --frozen --all-extras --dev
 
+    - name: Verify lock file
+      run: uv lock --check
+
+    - name: Install and verify ast-grep
+      run: |
+        # main.SUPPORTED_AST_GREP_VERSION is the sole owner of this version: the
+        # server refuses to start against any other ast-grep. Reading it here
+        # keeps CI from installing a version the runtime would reject.
+        version="$(uv run --frozen python -c 'import main; print(main.SUPPORTED_AST_GREP_VERSION)')"
+        npm install \
+          --prefix .ci-tools \
+          --no-save \
+          --package-lock=false \
+          "@ast-grep/cli@${version}"
+        executable="$(node -e '
+          const path = require("node:path")
+          const name = process.platform === "win32" ? "ast-grep.cmd" : "ast-grep"
+          process.stdout.write(path.resolve(".ci-tools/node_modules/.bin", name))
+        ')"
+        node -e '
+          const fs = require("node:fs")
+          if (!fs.statSync(process.argv[1]).isFile()) process.exit(1)
+        ' "$executable"
+        export PATH="$PWD/.ci-tools/node_modules/.bin:$PATH"
+        reported_version="$(ast-grep --version)"
+        test "$reported_version" = "ast-grep $version"
+        printf 'AST_GREP_TEST_EXECUTABLE=%s\n' "$executable" >> "$GITHUB_ENV"
+
     - name: Lint with ruff
       run: |
-        uv run ruff check .
+        uv run --frozen ruff check .
 
     - name: Format check with ruff
       run: |
-        uv run ruff format --check .
+        uv run --frozen ruff format --check .
 
     - name: Type check with mypy
       run: |
-        uv run mypy main.py
+        uv run --frozen mypy main.py tests
 
     - name: Smoke test packaged entry point
       run: |
-        uv run ast-grep-server --help
+        uv run --frozen ast-grep-server --help
 
     - name: Run unit tests
       run: |
-        uv run pytest tests/test_unit.py -v --cov=main --cov-report=term-missing
+        uv run --frozen pytest tests/test_unit.py -v --cov=main --cov-report=term-missing
 
     - name: Run integration tests
       run: |
-        uv run pytest tests/test_integration.py -v
+        uv run --frozen pytest tests/test_integration.py -v

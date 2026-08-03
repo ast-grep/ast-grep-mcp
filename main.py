@@ -3,36 +3,67 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform as platform_module
+import queue
 import shutil
+import signal
+import struct
 import subprocess
+import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Annotated, Any, Final, Literal, TypedDict
+from typing import Annotated, Any, BinaryIO, Final, Literal, TypedDict
 
 import yaml as yaml_parser
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import Field
 
 DEFAULT_MAX_RESULTS: Final = 50
 HARD_MAX_RESULTS: Final = 500
 DEFAULT_COMMAND_TIMEOUT_SECONDS: Final = 30.0
-FALLBACK_SERVER_VERSION: Final = "0.2.0"
+FALLBACK_SERVER_VERSION: Final = "0.3.0"
 NEUTRAL_AST_GREP_CONFIG: Final = "ruleDirs: []\n"
+SUPPORTED_AST_GREP_VERSION: Final = "0.45.0"
+MAX_INLINE_RULE_BYTES: Final = 64 * 1024
+MAX_OUTLINE_PATHS: Final = 64
+MAX_OUTLINE_RECORD_BYTES: Final = 1024 * 1024
+MAX_OUTLINE_AGGREGATE_BYTES: Final = 4 * 1024 * 1024
+OUTLINE_READ_CHUNK_BYTES: Final = 64 * 1024
+MAX_SUBPROCESS_DIAGNOSTIC_BYTES: Final = 64 * 1024
+WINDOWS_CREATE_PROCESS_LIMIT: Final = 32_767
+POSIX_ARG_HEADROOM_BYTES: Final = 2048
+PROCESS_TERMINATION_GRACE_SECONDS: Final = 2.0
 
 DumpFormat = Literal["pattern", "cst", "ast"]
 OutputFormat = Literal["text", "json"]
-Transport = Literal["stdio", "sse", "streamable-http"]
 CompletedTextProcess = subprocess.CompletedProcess[str]
 ProcessRunner = Callable[..., CompletedTextProcess]
+PopenFactory = Callable[..., subprocess.Popen[bytes]]
+OutlineProcessResult = tuple[list[dict[str, Any]], bool]
+OutlineProcessRunner = Callable[..., OutlineProcessResult]
 
 
 class SearchResults(TypedDict):
     matches: list[dict[str, Any]]
+    returned: int
+    truncated: bool
+    limit: int
+
+
+class OutlineFile(TypedDict):
+    file: str
+    language: str
+    items: list[dict[str, Any]]
+
+
+class OutlineResults(TypedDict):
+    files: list[OutlineFile]
     returned: int
     truncated: bool
     limit: int
@@ -70,10 +101,10 @@ class ServerRuntime:
 
 
 READ_ONLY_ANNOTATIONS: Final = ToolAnnotations(
-    readOnlyHint=True,
-    destructiveHint=False,
-    idempotentHint=True,
-    openWorldHint=False,
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
 )
 
 
@@ -150,6 +181,68 @@ def _npm_package_bin(package_directory: Path) -> Path | None:
     return target
 
 
+def _native_ast_grep_package_name() -> str | None:
+    """Return the optional @ast-grep package for the running platform."""
+    system = platform_module.system().lower()
+    machine = platform_module.machine().lower()
+    if system == "darwin":
+        architecture = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x64", "amd64": "x64"}.get(machine)
+        return f"@ast-grep/cli-darwin-{architecture}" if architecture is not None else None
+    if system == "windows":
+        architecture = {
+            "arm64": "arm64",
+            "aarch64": "arm64",
+            "x86_64": "x64",
+            "amd64": "x64",
+            "i386": "ia32",
+            "i686": "ia32",
+            "x86": "ia32",
+        }.get(machine)
+        return f"@ast-grep/cli-win32-{architecture}-msvc" if architecture is not None else None
+    if system == "linux":
+        libc_name = platform_module.libc_ver()[0].lower()
+        if libc_name and libc_name not in {"glibc", "gnu libc"}:
+            return None
+        architecture = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x64", "amd64": "x64"}.get(machine)
+        return f"@ast-grep/cli-linux-{architecture}-gnu" if architecture is not None else None
+    return None
+
+
+def _native_npm_ast_grep_bin(package_directory: Path) -> Path | None:
+    """Resolve the installed platform binary without launching an npm batch/JS shim."""
+    manifest = _read_json_file(package_directory / "package.json")
+    package_name = _native_ast_grep_package_name()
+    if manifest is None or package_name is None:
+        return None
+    optional_dependencies = manifest.get("optionalDependencies")
+    package_version = manifest.get("version")
+    if (
+        not isinstance(optional_dependencies, Mapping)
+        or not isinstance(package_version, str)
+        or optional_dependencies.get(package_name) != package_version
+    ):
+        return None
+
+    scope, separator, leaf = package_name.partition("/")
+    if scope != "@ast-grep" or separator != "/" or not leaf:
+        return None
+    native_package = package_directory.parent / leaf
+    native_manifest = _read_json_file(native_package / "package.json")
+    if native_manifest is None or native_manifest.get("name") != package_name or native_manifest.get("version") != package_version:
+        return None
+    executable_name = "ast-grep.exe" if os.name == "nt" else "ast-grep"
+    try:
+        executable = (native_package / executable_name).resolve(strict=True)
+        resolved_package = native_package.resolve(strict=True)
+    except FileNotFoundError:
+        return None
+    if not executable.is_file() or not _is_within(executable, resolved_package):
+        return None
+    if os.name != "nt" and not os.access(executable, os.X_OK):
+        return None
+    return executable
+
+
 def _find_npm_ast_grep_bin(shim_path: Path, resolved_path: Path) -> Path | None:
     package_candidates: list[Path] = []
     if shim_path.parent.name == ".bin":
@@ -207,6 +300,9 @@ def resolve_ast_grep_executable(raw_executable: str, *, working_directory: Path)
     npm_bin = _find_npm_ast_grep_bin(shim_path.absolute(), resolved_path)
     if npm_bin is not None:
         if _requires_node(npm_bin):
+            native_bin = _native_npm_ast_grep_bin(npm_bin.parent)
+            if native_bin is not None:
+                return ResolvedExecutable(path=native_bin, command_prefix=(str(native_bin),))
             node = shutil.which("node")
             if node is None:
                 raise ValueError("The @ast-grep/cli launcher requires Node.js, but node was not found")
@@ -234,6 +330,129 @@ def _bounded_error_text(value: str | None, *, limit: int = 4000) -> str:
     return text[:limit] + "…"
 
 
+def _utf16_code_units(value: str) -> int:
+    return len(value.encode("utf-16-le")) // 2
+
+
+def validate_process_budget(
+    command: Sequence[str],
+    *,
+    environment: Mapping[str, str] | None = None,
+    platform_name: str | None = None,
+    arg_max: int | None = None,
+) -> None:
+    """Reject a subprocess launch that cannot fit the host's argv/environment limits."""
+    if not command:
+        raise ValueError("Command must contain an executable")
+    if any(not isinstance(argument, str) or "\0" in argument for argument in command):
+        raise ValueError("Command arguments must be strings without NUL characters")
+
+    executable_suffix = Path(command[0]).suffix.lower()
+    if executable_suffix in {".bat", ".cmd"}:
+        raise ValueError(
+            "Batch-file commands are not launched directly; pass the resolved native executable or the JavaScript entry point through node"
+        )
+
+    launch_environment = os.environ if environment is None else environment
+    if any(
+        not isinstance(key, str) or not isinstance(value, str) or "\0" in key or "\0" in value or "=" in key
+        for key, value in launch_environment.items()
+    ):
+        raise ValueError("Subprocess environment names and values must be valid NUL-free strings")
+
+    effective_platform = os.name if platform_name is None else platform_name
+    if effective_platform == "nt":
+        quoted_command = subprocess.list2cmdline(list(command))
+        command_characters = _utf16_code_units(quoted_command) + 1
+        if command_characters > WINDOWS_CREATE_PROCESS_LIMIT:
+            raise ValueError(
+                "Command line is too large for Windows CreateProcessW: "
+                f"{command_characters} UTF-16 characters including NUL exceeds "
+                f"the {WINDOWS_CREATE_PROCESS_LIMIT}-character limit; shorten paths, globs, or inline rules"
+            )
+        environment_characters = 1 + sum(_utf16_code_units(f"{key}={value}") + 1 for key, value in launch_environment.items())
+        if environment_characters > WINDOWS_CREATE_PROCESS_LIMIT:
+            raise ValueError(
+                "Environment block is too large for Windows process creation: "
+                f"{environment_characters} UTF-16 characters exceeds "
+                f"the {WINDOWS_CREATE_PROCESS_LIMIT}-character limit; remove unnecessary environment variables"
+            )
+        return
+
+    if effective_platform != "posix":
+        raise ValueError(f"Unsupported subprocess platform: {effective_platform}")
+    detected_arg_max = arg_max
+    if detected_arg_max is None:
+        try:
+            # POSIX-only. Unreachable on Windows through the check above, but that check reads a
+            # runtime-parameterized value, so mypy cannot narrow it. AttributeError is caught.
+            detected_arg_max = int(os.sysconf("SC_ARG_MAX"))  # type: ignore[attr-defined]
+        except (AttributeError, OSError, ValueError) as error:
+            raise ValueError("Could not determine the POSIX ARG_MAX process-launch budget") from error
+    if detected_arg_max <= POSIX_ARG_HEADROOM_BYTES:
+        raise ValueError(f"Invalid POSIX ARG_MAX process-launch budget: {detected_arg_max}")
+
+    argv_bytes = sum(len(os.fsencode(argument)) + 1 for argument in command)
+    environment_bytes = sum(len(os.fsencode(key)) + len(os.fsencode(value)) + 2 for key, value in launch_environment.items())
+    pointer_bytes = (len(command) + len(launch_environment) + 2) * struct.calcsize("P")
+    process_bytes = argv_bytes + environment_bytes + pointer_bytes
+    usable_bytes = detected_arg_max - POSIX_ARG_HEADROOM_BYTES
+    if process_bytes > usable_bytes:
+        raise ValueError(
+            "Command and environment are too large for POSIX ARG_MAX: "
+            f"estimated {process_bytes} bytes exceeds the {usable_bytes}-byte budget after "
+            f"{POSIX_ARG_HEADROOM_BYTES} bytes of headroom; shorten paths, globs, inline rules, or the environment"
+        )
+
+
+def _is_benign_scan_diagnostic(line: str) -> bool:
+    """Report whether a stderr line is ast-grep's successful error-severity summary.
+
+    Verified against 0.45.0: a `scan` whose error-severity rule matched writes
+    `Error: N error(s) found in code.` and `Help: Scan succeeded ...` while still
+    streaming its findings on stdout. That is a complete, successful scan.
+    """
+    if line.startswith("Help:"):
+        return True
+    return line.startswith("Error: ") and line.endswith(" error(s) found in code.")
+
+
+def _residual_stderr(stderr: str) -> str:
+    """Return the stderr that remains once the benign scan summary is removed."""
+    lines = (raw.strip() for raw in stderr.splitlines())
+    return "\n".join(line for line in lines if line and not _is_benign_scan_diagnostic(line))
+
+
+def _run_managed_completed_process(
+    command: Sequence[str],
+    *,
+    timeout_seconds: float,
+    input_text: str | None,
+    working_directory: Path | None,
+    environment: Mapping[str, str],
+) -> CompletedTextProcess:
+    process = subprocess.Popen(
+        list(command),
+        stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=str(working_directory) if working_directory is not None else None,
+        env=dict(environment),
+        shell=False,
+        **_popen_process_group_options(),
+    )
+    try:
+        stdout, stderr = process.communicate(input=input_text, timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        _terminate_and_reap(process)
+        raise
+    except BaseException:
+        _terminate_and_reap(process)
+        raise
+    return subprocess.CompletedProcess(list(command), process.returncode, stdout, stderr)
+
+
 def run_process(
     command: Sequence[str],
     *,
@@ -243,21 +462,35 @@ def run_process(
     allowed_exit_codes: frozenset[int] = frozenset({0}),
     runner: ProcessRunner = subprocess.run,
 ) -> CompletedTextProcess:
+    launch_environment = dict(os.environ)
+    validate_process_budget(command, environment=launch_environment)
     try:
-        result = runner(
-            list(command),
-            capture_output=True,
-            input=input_text,
-            text=True,
-            timeout=timeout_seconds,
-            cwd=str(working_directory) if working_directory is not None else None,
-            check=False,
-            shell=False,
-        )
+        if runner is subprocess.run:
+            result = _run_managed_completed_process(
+                command,
+                timeout_seconds=timeout_seconds,
+                input_text=input_text,
+                working_directory=working_directory,
+                environment=launch_environment,
+            )
+        else:
+            result = runner(
+                list(command),
+                capture_output=True,
+                input=input_text,
+                text=True,
+                timeout=timeout_seconds,
+                cwd=str(working_directory) if working_directory is not None else None,
+                check=False,
+                shell=False,
+                env=launch_environment,
+            )
     except subprocess.TimeoutExpired as error:
         raise RuntimeError(f"Command timed out after {timeout_seconds:g} seconds") from error
     except FileNotFoundError as error:
         raise RuntimeError(f"Command executable was not found: {command[0]}") from error
+    except OSError as error:
+        raise RuntimeError(f"Command could not be executed: {error}") from error
 
     if result.returncode not in allowed_exit_codes:
         detail = _bounded_error_text(result.stderr)
@@ -279,7 +512,10 @@ def _read_ast_grep_version(
     parts = result.stdout.strip().split()
     if len(parts) < 2 or parts[0] != "ast-grep":
         raise ValueError(f"Configured executable is not ast-grep: {_bounded_error_text(result.stdout)}")
-    return parts[1]
+    executable_version = parts[1]
+    if executable_version != SUPPORTED_AST_GREP_VERSION:
+        raise ValueError(f"Unsupported ast-grep version {executable_version}; expected {SUPPORTED_AST_GREP_VERSION}")
+    return executable_version
 
 
 def build_runtime(
@@ -337,6 +573,8 @@ def _contains_mapping_key(value: Any, forbidden_key: str) -> bool:
 
 
 def validate_rule_yaml(rule_yaml: str, *, forbid_regex_rules: bool) -> None:
+    if len(rule_yaml.encode("utf-8")) > MAX_INLINE_RULE_BYTES:
+        raise ValueError(f"ast-grep rule YAML exceeds the {MAX_INLINE_RULE_BYTES // 1024} KiB inline limit")
     try:
         documents = list(yaml_parser.safe_load_all(rule_yaml))
     except yaml_parser.YAMLError as error:
@@ -372,6 +610,313 @@ def parse_stream_matches(stdout: str) -> list[dict[str, Any]]:
     return matches
 
 
+@dataclass(frozen=True)
+class _PipeReadFailure:
+    error: BaseException
+
+
+@dataclass(frozen=True)
+class _PipeEof:
+    pass
+
+
+_PIPE_EOF: Final = _PipeEof()
+PipeEvent = bytes | _PipeReadFailure | _PipeEof
+
+
+def _put_pipe_event(
+    events: queue.Queue[PipeEvent],
+    event: PipeEvent,
+    stop_reading: threading.Event,
+) -> None:
+    while not stop_reading.is_set():
+        try:
+            events.put(event, timeout=0.05)
+        except queue.Full:
+            continue
+        return
+
+
+def _queue_pipe_chunks(
+    pipe: BinaryIO,
+    events: queue.Queue[PipeEvent],
+    stop_reading: threading.Event,
+) -> None:
+    try:
+        while not stop_reading.is_set():
+            chunk = pipe.read(OUTLINE_READ_CHUNK_BYTES)
+            if not chunk:
+                _put_pipe_event(events, _PIPE_EOF, stop_reading)
+                return
+            _put_pipe_event(events, chunk, stop_reading)
+    except (OSError, ValueError) as error:
+        if not stop_reading.is_set():
+            _put_pipe_event(events, _PipeReadFailure(error), stop_reading)
+
+
+def _drain_stderr(
+    pipe: BinaryIO,
+    captured: bytearray,
+    failures: list[BaseException],
+    stop_reading: threading.Event,
+) -> None:
+    try:
+        while not stop_reading.is_set():
+            chunk = pipe.read(OUTLINE_READ_CHUNK_BYTES)
+            if not chunk:
+                return
+            available = MAX_SUBPROCESS_DIAGNOSTIC_BYTES - len(captured)
+            if available > 0:
+                captured.extend(chunk[:available])
+    except (OSError, ValueError) as error:
+        if not stop_reading.is_set():
+            failures.append(error)
+
+
+def _popen_process_group_options() -> dict[str, Any]:
+    if os.name == "posix":
+        return {"start_new_session": True}
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+    return {}
+
+
+def _terminate_and_reap(process: subprocess.Popen[Any]) -> None:
+    """Terminate the subprocess group, escalating if its graceful window expires."""
+    if process.poll() is not None:
+        process.wait()
+        return
+
+    signaled_group = False
+    if os.name == "posix":
+        try:
+            # POSIX-only names. mypy narrows platform branches on sys.platform, not os.name,
+            # so it cannot see that this block is unreachable on Windows.
+            os.killpg(process.pid, signal.SIGTERM)  # type: ignore[attr-defined]
+            signaled_group = True
+        except OSError:
+            pass
+    elif os.name == "nt" and hasattr(signal, "CTRL_BREAK_EVENT"):
+        try:
+            process.send_signal(signal.CTRL_BREAK_EVENT)
+            signaled_group = True
+        except OSError:
+            pass
+    if not signaled_group:
+        try:
+            process.terminate()
+        except OSError:
+            pass
+
+    try:
+        process.wait(timeout=PROCESS_TERMINATION_GRACE_SECONDS)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)  # type: ignore[attr-defined]
+        except OSError:
+            pass
+    try:
+        process.kill()
+    except OSError:
+        pass
+    try:
+        process.wait(timeout=PROCESS_TERMINATION_GRACE_SECONDS)
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("Command process could not be reaped after termination") from error
+
+
+def _validate_and_count_outline_document(document: dict[str, Any], *, record_number: int) -> int:
+    raw_path = document.get("path")
+    language = document.get("language")
+    items = document.get("items")
+    if not isinstance(raw_path, str) or not raw_path:
+        raise RuntimeError(f"ast-grep outline record {record_number} has no path")
+    if not isinstance(language, str):
+        raise RuntimeError(f"ast-grep outline record {record_number} has no language")
+    if not isinstance(items, list):
+        raise RuntimeError(f"ast-grep outline record {record_number} has no items list")
+
+    count = 0
+    remaining: list[Any] = list(reversed(items))
+    while remaining:
+        node = remaining.pop()
+        if not isinstance(node, dict):
+            raise RuntimeError(f"ast-grep outline record {record_number} contains a non-object node")
+        count += 1
+        if "members" not in node:
+            continue
+        members = node["members"]
+        if not isinstance(members, list):
+            raise RuntimeError(f"ast-grep outline record {record_number} contains a non-list members field")
+        remaining.extend(reversed(members))
+    return count
+
+
+def _parse_outline_record(raw_record: bytes, *, record_number: int) -> tuple[dict[str, Any], int] | None:
+    if len(raw_record) > MAX_OUTLINE_RECORD_BYTES:
+        raise RuntimeError(f"ast-grep outline record exceeds the {MAX_OUTLINE_RECORD_BYTES // 1024} KiB limit (record {record_number})")
+    stripped = raw_record.strip()
+    if not stripped:
+        return None
+    try:
+        value = json.loads(stripped.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+        raise RuntimeError(f"ast-grep outline emitted invalid JSON in record {record_number}") from error
+    if not isinstance(value, dict):
+        raise RuntimeError(f"ast-grep outline emitted a non-object JSON record {record_number}")
+    return value, _validate_and_count_outline_document(value, record_number=record_number)
+
+
+def run_outline_process(
+    command: Sequence[str],
+    *,
+    timeout_seconds: float,
+    working_directory: Path,
+    node_limit: int,
+    popen_factory: PopenFactory = subprocess.Popen,
+) -> OutlineProcessResult:
+    """Stream bounded ast-grep outline records and stop after observing node limit + 1."""
+    if node_limit < 1:
+        raise ValueError("Outline node limit must be positive")
+    launch_environment = dict(os.environ)
+    validate_process_budget(command, environment=launch_environment)
+    try:
+        process = popen_factory(
+            list(command),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=str(working_directory),
+            env=launch_environment,
+            shell=False,
+            bufsize=0,
+            **_popen_process_group_options(),
+        )
+    except FileNotFoundError as error:
+        raise RuntimeError(f"Command executable was not found: {command[0]}") from error
+    except OSError as error:
+        raise RuntimeError(f"Command could not be executed: {error}") from error
+
+    if process.stdout is None or process.stderr is None:  # pragma: no cover - guaranteed by PIPE
+        _terminate_and_reap(process)
+        raise RuntimeError("Command pipes were not created")
+
+    stop_reading = threading.Event()
+    stdout_events: queue.Queue[PipeEvent] = queue.Queue(maxsize=4)
+    captured_stderr = bytearray()
+    stderr_failures: list[BaseException] = []
+    stdout_thread = threading.Thread(
+        target=_queue_pipe_chunks,
+        args=(process.stdout, stdout_events, stop_reading),
+        name="ast-grep-outline-stdout",
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=_drain_stderr,
+        args=(process.stderr, captured_stderr, stderr_failures, stop_reading),
+        name="ast-grep-outline-stderr",
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+
+    documents: list[dict[str, Any]] = []
+    record_buffer = bytearray()
+    record_number = 0
+    aggregate_bytes = 0
+    observed_nodes = 0
+    observed_extra = False
+    terminated_for_limit = False
+    deadline = time.monotonic() + timeout_seconds
+
+    def consume_record(raw_record: bytes) -> None:
+        nonlocal observed_extra, observed_nodes, record_number
+        record_number += 1
+        parsed = _parse_outline_record(raw_record, record_number=record_number)
+        if parsed is None:
+            return
+        document, node_count = parsed
+        documents.append(document)
+        observed_nodes += node_count
+        if observed_nodes >= node_limit + 1:
+            observed_extra = True
+
+    try:
+        stdout_finished = False
+        while not stdout_finished and not observed_extra:
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                raise RuntimeError(f"Command timed out after {timeout_seconds:g} seconds")
+            try:
+                event = stdout_events.get(timeout=remaining_seconds)
+            except queue.Empty as error:
+                raise RuntimeError(f"Command timed out after {timeout_seconds:g} seconds") from error
+            if isinstance(event, _PipeReadFailure):
+                raise RuntimeError(f"Could not read ast-grep outline output: {event.error}") from event.error
+            if isinstance(event, _PipeEof):
+                stdout_finished = True
+                break
+
+            aggregate_bytes += len(event)
+            if aggregate_bytes > MAX_OUTLINE_AGGREGATE_BYTES:
+                raise RuntimeError(
+                    f"ast-grep outline output exceeds the {MAX_OUTLINE_AGGREGATE_BYTES // (1024 * 1024)} MiB aggregate limit"
+                )
+            record_buffer.extend(event)
+            newline_index = record_buffer.find(b"\n")
+            while newline_index >= 0:
+                raw_record = bytes(record_buffer[:newline_index])
+                del record_buffer[: newline_index + 1]
+                consume_record(raw_record)
+                if observed_extra:
+                    break
+                newline_index = record_buffer.find(b"\n")
+            if not observed_extra and len(record_buffer) > MAX_OUTLINE_RECORD_BYTES:
+                raise RuntimeError(f"ast-grep outline record exceeds the {MAX_OUTLINE_RECORD_BYTES // 1024} KiB limit")
+
+        if not observed_extra and record_buffer:
+            consume_record(bytes(record_buffer))
+
+        if observed_extra:
+            if process.poll() is None:
+                terminated_for_limit = True
+                _terminate_and_reap(process)
+            else:
+                process.wait()
+        else:
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                raise RuntimeError(f"Command timed out after {timeout_seconds:g} seconds")
+            try:
+                process.wait(timeout=remaining_seconds)
+            except subprocess.TimeoutExpired as error:
+                raise RuntimeError(f"Command timed out after {timeout_seconds:g} seconds") from error
+    finally:
+        if process.poll() is None:
+            _terminate_and_reap(process)
+        stop_reading.set()
+        process.stdout.close()
+        process.stderr.close()
+        stdout_thread.join(timeout=PROCESS_TERMINATION_GRACE_SECONDS)
+        stderr_thread.join(timeout=PROCESS_TERMINATION_GRACE_SECONDS)
+
+    if stdout_thread.is_alive() or stderr_thread.is_alive():
+        raise RuntimeError("Command pipe readers did not stop after process exit")
+    if stderr_failures:
+        raise RuntimeError(f"Could not read ast-grep outline diagnostics: {stderr_failures[0]}")
+    stderr_text = captured_stderr.decode("utf-8", errors="replace")
+    if not terminated_for_limit and process.returncode != 0:
+        raise RuntimeError(f"Command failed with exit code {process.returncode}: {_bounded_error_text(stderr_text)}")
+    residual_stderr = _residual_stderr(stderr_text)
+    if residual_stderr:
+        raise RuntimeError(f"ast-grep outline failed: {_bounded_error_text(residual_stderr)}")
+    return documents, observed_extra
+
+
 def format_matches_as_text(matches: Sequence[Mapping[str, Any]]) -> str:
     output_blocks: list[str] = []
     for match in matches:
@@ -404,15 +949,65 @@ def search_tool_result(results: SearchResults, output_format: OutputFormat) -> C
     if output_format == "json":
         return CallToolResult(
             content=[TextContent(type="text", text=json.dumps(results, separators=(",", ":")))],
-            structuredContent=dict(results),
+            structured_content=dict(results),
         )
-    return CallToolResult(content=[TextContent(type="text", text=format_search_results(results))])
+    return CallToolResult(
+        content=[TextContent(type="text", text=format_search_results(results))],
+        structured_content=dict(results),
+    )
+
+
+def _format_outline_nodes(nodes: Sequence[Mapping[str, Any]], *, depth: int) -> list[str]:
+    lines: list[str] = []
+    for node in nodes:
+        signature = node.get("signature")
+        name = node.get("name")
+        symbol_type = node.get("symbolType")
+        label = signature if isinstance(signature, str) and signature else name
+        if not isinstance(label, str) or not label:
+            label = str(symbol_type) if isinstance(symbol_type, str) and symbol_type else "(unnamed)"
+        lines.append(f"{'  ' * depth}- {label}")
+        members = node.get("members")
+        if isinstance(members, list):
+            lines.extend(_format_outline_nodes(members, depth=depth + 1))
+    return lines
+
+
+def format_outline_results(results: OutlineResults) -> str:
+    if results["returned"] == 0:
+        return "No outline nodes found"
+    noun = "node" if results["returned"] == 1 else "nodes"
+    header = f"Found {results['returned']} outline {noun}"
+    if results["truncated"]:
+        header += f" (limit {results['limit']}; additional nodes exist)"
+    sections = [header]
+    for file_result in results["files"]:
+        file_header = file_result["file"]
+        if file_result["language"]:
+            file_header += f" ({file_result['language']})"
+        sections.append("\n".join([file_header, *_format_outline_nodes(file_result["items"], depth=1)]))
+    return "\n\n".join(sections)
+
+
+def outline_tool_result(results: OutlineResults, output_format: OutputFormat) -> CallToolResult:
+    text = json.dumps(results, separators=(",", ":")) if output_format == "json" else format_outline_results(results)
+    return CallToolResult(
+        content=[TextContent(type="text", text=text)],
+        structured_content=dict(results),
+    )
 
 
 class AstGrepService:
-    def __init__(self, runtime: ServerRuntime, *, runner: ProcessRunner = subprocess.run) -> None:
+    def __init__(
+        self,
+        runtime: ServerRuntime,
+        *,
+        runner: ProcessRunner = subprocess.run,
+        outline_runner: OutlineProcessRunner = run_outline_process,
+    ) -> None:
         self.runtime = runtime
         self.runner = runner
+        self.outline_runner = outline_runner
 
     def _run(
         self,
@@ -446,8 +1041,16 @@ class AstGrepService:
                 allowed_exit_codes=frozenset({0, 1}) if allow_no_matches else frozenset({0}),
                 runner=self.runner,
             )
-        if result.returncode == 1 and result.stderr.strip() and not result.stdout.strip() and not allow_stderr_on_no_matches:
-            raise RuntimeError(f"ast-grep search failed: {_bounded_error_text(result.stderr)}")
+        # Verified against 0.45.0: `run` exits 1 with empty stderr when nothing
+        # matches, and 8 for an invalid pattern. `scan` exits 1 when an
+        # error-severity rule matched, streaming findings on stdout. But a
+        # per-path failure ("ERROR: <path>: No such file or directory") leaves
+        # exit 0 with partial results on stdout, so the exit code cannot
+        # distinguish a partial scan from a complete one. Residual stderr can.
+        if not allow_stderr_on_no_matches:
+            residual = _residual_stderr(result.stderr)
+            if residual:
+                raise RuntimeError(f"ast-grep search failed: {_bounded_error_text(residual)}")
         return result
 
     @staticmethod
@@ -486,6 +1089,29 @@ class AstGrepService:
                 resolved_paths.append(resolved)
         return resolved_paths
 
+    def _resolve_outline_paths(self, project: Path, raw_paths: Sequence[str]) -> list[Path]:
+        if not 1 <= len(raw_paths) <= MAX_OUTLINE_PATHS:
+            raise ValueError(f"paths must contain between 1 and {MAX_OUTLINE_PATHS} relative files")
+        resolved_paths: list[Path] = []
+        for raw_path in raw_paths:
+            if not raw_path or "\0" in raw_path:
+                raise ValueError("Outline paths cannot contain empty or NUL values")
+            candidate = Path(raw_path)
+            if candidate.is_absolute():
+                raise ValueError(f"Outline paths must be relative to project_folder: {raw_path}")
+            try:
+                resolved = (project / candidate).resolve(strict=True)
+            except FileNotFoundError as error:
+                raise ValueError(f"Outline path does not exist: {raw_path}") from error
+            if not _is_within(resolved, project):
+                raise ValueError(f"Outline path resolves outside project_folder: {raw_path}")
+            _require_allowed(resolved, self.runtime.allowed_roots, label="Outline path")
+            if not resolved.is_file():
+                raise ValueError(f"Outline path must be a regular file: {raw_path}")
+            if resolved not in resolved_paths:
+                resolved_paths.append(resolved)
+        return resolved_paths
+
     @staticmethod
     def _glob_arguments(include_globs: Sequence[str] | None, exclude_globs: Sequence[str] | None) -> list[str]:
         arguments: list[str] = []
@@ -499,18 +1125,26 @@ class AstGrepService:
             arguments.extend(["--globs", f"!{glob}"])
         return arguments
 
+    @staticmethod
+    def _contained_relative_path(raw_path: str, project: Path, *, noun: str) -> str:
+        """Resolve an ast-grep-reported path and prove it stayed inside the project."""
+        file_path = Path(raw_path)
+        if not file_path.is_absolute():
+            file_path = project / file_path
+        try:
+            resolved_file = file_path.resolve(strict=True)
+        except FileNotFoundError as error:
+            raise RuntimeError(f"ast-grep returned {noun} that no longer exists: {raw_path}") from error
+        if not _is_within(resolved_file, project):
+            raise RuntimeError(f"ast-grep returned {noun} outside project_folder: {raw_path}")
+        return resolved_file.relative_to(project).as_posix()
+
     def _normalize_match_path(self, match: dict[str, Any], project: Path) -> dict[str, Any]:
         raw_file = match.get("file")
         if not isinstance(raw_file, str) or not raw_file:
             return match
-        file_path = Path(raw_file)
-        if not file_path.is_absolute():
-            file_path = project / file_path
-        resolved_file = file_path.resolve(strict=True)
-        if not _is_within(resolved_file, project):
-            raise RuntimeError(f"ast-grep returned a match outside project_folder: {raw_file}")
         normalized = dict(match)
-        normalized["file"] = resolved_file.relative_to(project).as_posix()
+        normalized["file"] = self._contained_relative_path(raw_file, project, noun="a match")
         return normalized
 
     def _result_limit(self, requested: int | None) -> int:
@@ -528,6 +1162,7 @@ class AstGrepService:
         include_globs: Sequence[str] | None,
         exclude_globs: Sequence[str] | None,
         max_results: int | None,
+        include_metadata: bool = False,
     ) -> SearchResults:
         validate_rule_yaml(rule_yaml, forbid_regex_rules=self.runtime.forbid_regex_rules)
         project = self._resolve_project(project_folder)
@@ -539,6 +1174,7 @@ class AstGrepService:
             "--json=stream",
             "--max-results",
             str(limit + 1),
+            *(["--include-metadata"] if include_metadata else []),
             *self._glob_arguments(include_globs, exclude_globs),
             *(str(path) for path in search_paths),
         ]
@@ -558,14 +1194,121 @@ class AstGrepService:
             "limit": limit,
         }
 
+    @classmethod
+    def _trim_outline_nodes(
+        cls,
+        nodes: Sequence[dict[str, Any]],
+        remaining: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        kept: list[dict[str, Any]] = []
+        consumed = 0
+        for node in nodes:
+            if consumed >= remaining:
+                break
+            normalized = dict(node)
+            consumed += 1
+            members = node.get("members")
+            if isinstance(members, list):
+                kept_members, member_count = cls._trim_outline_nodes(members, remaining - consumed)
+                normalized["members"] = kept_members
+                consumed += member_count
+            kept.append(normalized)
+        return kept, consumed
+
+    def _bound_outline(
+        self,
+        documents: Sequence[dict[str, Any]],
+        project: Path,
+        limit: int,
+        *,
+        observed_extra: bool,
+    ) -> OutlineResults:
+        """Trim validated outline hierarchy to the configured recursive node limit."""
+        files: list[OutlineFile] = []
+        remaining = limit
+        returned = 0
+        truncated = observed_extra
+        for record_number, document in enumerate(documents, start=1):
+            node_count = _validate_and_count_outline_document(document, record_number=record_number)
+            items = document.get("items")
+            raw_path = document.get("path")
+            language = document.get("language")
+            if not isinstance(items, list) or not isinstance(raw_path, str) or not isinstance(language, str):
+                raise RuntimeError(f"ast-grep outline record {record_number} failed validation")
+            kept, consumed = self._trim_outline_nodes(items, remaining)
+            if consumed < node_count:
+                truncated = True
+            if kept or not items:
+                files.append(
+                    {
+                        "file": self._contained_relative_path(raw_path, project, noun="an outline path"),
+                        "language": language,
+                        "items": kept,
+                    }
+                )
+            returned += consumed
+            remaining -= consumed
+        return {
+            "files": files,
+            "returned": returned,
+            "truncated": truncated,
+            "limit": limit,
+        }
+
+    def outline_code(
+        self,
+        *,
+        project_folder: str,
+        paths: Sequence[str],
+        language: str | None,
+        max_results: int | None,
+    ) -> OutlineResults:
+        if language is not None and not language:
+            raise ValueError("language cannot be empty when provided")
+        project = self._resolve_project(project_folder)
+        outline_paths = self._resolve_outline_paths(project, paths)
+        limit = self._result_limit(max_results)
+        arguments = [
+            # The `=` is mandatory for this flag; `--json stream` is rejected.
+            "--json=stream",
+            "--threads",
+            "1",
+            *(["--lang", language] if language is not None else []),
+            *(str(path) for path in outline_paths),
+        ]
+        with ExitStack() as stack:
+            config_path = self.runtime.config_path
+            if config_path is None:
+                temporary_directory = Path(stack.enter_context(TemporaryDirectory(prefix="ast-grep-mcp-")))
+                config_path = temporary_directory / "sgconfig.yml"
+                config_path.write_text(NEUTRAL_AST_GREP_CONFIG, encoding="utf-8")
+            command = [
+                *self.runtime.executable.command_prefix,
+                "outline",
+                "--config",
+                str(config_path),
+                *arguments,
+            ]
+            documents, observed_extra = self.outline_runner(
+                command,
+                timeout_seconds=self.runtime.command_timeout_seconds,
+                working_directory=project,
+                node_limit=limit,
+            )
+        return self._bound_outline(documents, project, limit, observed_extra=observed_extra)
+
     def dump_syntax_tree(self, *, code: str, language: str, format: DumpFormat) -> str:
         self._require_language(language)
-        result = self._run(
-            "run",
-            ["--pattern", code, "--lang", language, f"--debug-query={format}"],
-            allow_no_matches=True,
-            allow_stderr_on_no_matches=True,
-        )
+        # `run` with no path scans the process working directory, which may lie
+        # outside the allowed roots; an empty sandbox keeps the probe contained.
+        with TemporaryDirectory(prefix="ast-grep-mcp-dump-") as sandbox:
+            result = self._run(
+                "run",
+                ["--pattern", code, "--lang", language, f"--debug-query={format}"],
+                working_directory=Path(sandbox),
+                allow_no_matches=True,
+                allow_stderr_on_no_matches=True,
+            )
         return result.stderr.strip()
 
     def test_match_code_rule(self, *, code: str, rule_yaml: str) -> list[dict[str, Any]]:
@@ -623,6 +1366,7 @@ class AstGrepService:
         include_globs: Sequence[str] | None,
         exclude_globs: Sequence[str] | None,
         max_results: int | None,
+        include_metadata: bool = False,
     ) -> SearchResults:
         return self._search(
             project_folder=project_folder,
@@ -631,6 +1375,7 @@ class AstGrepService:
             include_globs=include_globs,
             exclude_globs=exclude_globs,
             max_results=max_results,
+            include_metadata=include_metadata,
         )
 
     def get_server_info(self) -> ServerInfo:
@@ -661,17 +1406,18 @@ def current_service() -> AstGrepService:
     return AstGrepService(_runtime)
 
 
-mcp = FastMCP(
+mcp = MCPServer(
     "ast-grep",
     instructions=(
         "Read-only structural code inspection. Inspect syntax and probe rules before bounded project searches. "
         "Use repository CLI workflows for exhaustive scans and rewrites."
     ),
+    version=_server_version(),
 )
 
 
-def register_mcp_tools(server: FastMCP) -> None:
-    @server.tool(annotations=READ_ONLY_ANNOTATIONS)
+def register_mcp_tools(server: MCPServer) -> None:
+    @server.tool(annotations=READ_ONLY_ANNOTATIONS, title="Dump syntax tree")
     def dump_syntax_tree(
         code: Annotated[str, Field(description="Code or pattern to inspect")],
         language: Annotated[str, Field(description="Explicit ast-grep language")],
@@ -683,7 +1429,7 @@ def register_mcp_tools(server: FastMCP) -> None:
         """Inspect how ast-grep parses code or a query pattern."""
         return current_service().dump_syntax_tree(code=code, language=language, format=format)
 
-    @server.tool(annotations=READ_ONLY_ANNOTATIONS)
+    @server.tool(annotations=READ_ONLY_ANNOTATIONS, title="Test rule against code")
     def test_match_code_rule(
         code: Annotated[str, Field(description="Code to test against the rule")],
         yaml: Annotated[str, Field(description="ast-grep YAML with id, language, and rule fields")],
@@ -691,7 +1437,54 @@ def register_mcp_tools(server: FastMCP) -> None:
         """Probe an ast-grep YAML rule against a code snippet; a valid negative probe returns an empty list."""
         return current_service().test_match_code_rule(code=code, rule_yaml=yaml)
 
-    @server.tool(annotations=READ_ONLY_ANNOTATIONS)
+    @server.tool(annotations=READ_ONLY_ANNOTATIONS, title="Outline code")
+    def outline_code(
+        project_folder: Annotated[
+            str,
+            Field(description="Project directory, resolved and constrained to the server's allowed roots"),
+        ],
+        paths: Annotated[
+            list[str],
+            Field(
+                min_length=1,
+                max_length=MAX_OUTLINE_PATHS,
+                description=(
+                    "One to 64 relative regular files under project_folder; directories, absolute paths, "
+                    "and paths that escape the project are rejected"
+                ),
+            ),
+        ],
+        language: Annotated[
+            str | None,
+            Field(description="Optional explicit ast-grep language; omitted to use extension-based detection"),
+        ] = None,
+        max_results: Annotated[
+            int | None,
+            Field(
+                ge=1,
+                le=HARD_MAX_RESULTS,
+                description=(
+                    "Finite symbol limit across all files; defaults to the server's configured limit. This schema "
+                    "bound is the hard ceiling: an operator may configure a lower cap, which get_server_info reports "
+                    "as max_results_cap and which rejects larger values at call time."
+                ),
+            ),
+        ] = None,
+        output_format: Annotated[
+            OutputFormat,
+            Field(description="Compact text or structured JSON result"),
+        ] = "text",
+    ) -> Annotated[CallToolResult, OutlineResults]:
+        """Extract a bounded per-file symbol hierarchy from explicit regular files."""
+        results = current_service().outline_code(
+            project_folder=project_folder,
+            paths=paths,
+            language=language,
+            max_results=max_results,
+        )
+        return outline_tool_result(results, output_format)
+
+    @server.tool(annotations=READ_ONLY_ANNOTATIONS, title="Find code by pattern")
     def find_code(
         project_folder: Annotated[
             str,
@@ -713,13 +1506,21 @@ def register_mcp_tools(server: FastMCP) -> None:
         ] = None,
         max_results: Annotated[
             int | None,
-            Field(ge=1, le=HARD_MAX_RESULTS, description="Finite result limit; defaults to the server's configured limit"),
+            Field(
+                ge=1,
+                le=HARD_MAX_RESULTS,
+                description=(
+                    "Finite result limit; defaults to the server's configured limit. This schema bound is the hard "
+                    "ceiling: an operator may configure a lower cap, which get_server_info reports as max_results_cap "
+                    "and which rejects larger values at call time."
+                ),
+            ),
         ] = None,
         output_format: Annotated[
             OutputFormat,
             Field(description="Compact text or structured JSON result"),
         ] = "text",
-    ) -> CallToolResult:
+    ) -> Annotated[CallToolResult, SearchResults]:
         """Find bounded structural pattern matches inside an allowed project scope."""
         results = current_service().find_code(
             project_folder=project_folder,
@@ -730,9 +1531,12 @@ def register_mcp_tools(server: FastMCP) -> None:
             exclude_globs=exclude_globs,
             max_results=max_results,
         )
+        # The Annotated metadata declares the wire output schema. The SDK validates
+        # this result's structured content against it and forwards the result
+        # unchanged; a mismatch surfaces as an error result, not a protocol fault.
         return search_tool_result(results, output_format)
 
-    @server.tool(annotations=READ_ONLY_ANNOTATIONS)
+    @server.tool(annotations=READ_ONLY_ANNOTATIONS, title="Find code by rule")
     def find_code_by_rule(
         project_folder: Annotated[
             str,
@@ -753,13 +1557,25 @@ def register_mcp_tools(server: FastMCP) -> None:
         ] = None,
         max_results: Annotated[
             int | None,
-            Field(ge=1, le=HARD_MAX_RESULTS, description="Finite result limit; defaults to the server's configured limit"),
+            Field(
+                ge=1,
+                le=HARD_MAX_RESULTS,
+                description=(
+                    "Finite result limit; defaults to the server's configured limit. This schema bound is the hard "
+                    "ceiling: an operator may configure a lower cap, which get_server_info reports as max_results_cap "
+                    "and which rejects larger values at call time."
+                ),
+            ),
         ] = None,
+        include_metadata: Annotated[
+            bool,
+            Field(description="Include each rule's documented metadata object in ast-grep match records"),
+        ] = False,
         output_format: Annotated[
             OutputFormat,
             Field(description="Compact text or structured JSON result"),
         ] = "text",
-    ) -> CallToolResult:
+    ) -> Annotated[CallToolResult, SearchResults]:
         """Find bounded matches for one or more validated ast-grep YAML rules."""
         results = current_service().find_code_by_rule(
             project_folder=project_folder,
@@ -768,10 +1584,14 @@ def register_mcp_tools(server: FastMCP) -> None:
             include_globs=include_globs,
             exclude_globs=exclude_globs,
             max_results=max_results,
+            include_metadata=include_metadata,
         )
+        # The Annotated metadata declares the wire output schema. The SDK validates
+        # this result's structured content against it and forwards the result
+        # unchanged; a mismatch surfaces as an error result, not a protocol fault.
         return search_tool_result(results, output_format)
 
-    @server.tool(annotations=READ_ONLY_ANNOTATIONS)
+    @server.tool(annotations=READ_ONLY_ANNOTATIONS, title="Get server info")
     def get_server_info() -> ServerInfo:
         """Report the fork, executable, containment, configuration, timeout, and result-limit contract."""
         return current_service().get_server_info()
@@ -840,17 +1660,20 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--forbid-regex-rules",
         action=argparse.BooleanOptionalAction,
-        default=_environment_bool("AST_GREP_FORBID_REGEX_RULES"),
-        help="Reject inline ast-grep YAML containing regex matcher keys",
+        default=None,
+        help=(
+            "Reject inline ast-grep YAML containing a regex key anywhere in the document, "
+            "including metavariable constraints, nested relational rules, and utils; "
+            "unset falls back to AST_GREP_FORBID_REGEX_RULES"
+        ),
     )
-    parser.add_argument(
-        "--transport",
-        choices=("stdio", "sse", "streamable-http"),
-        default="stdio",
-        help="MCP transport",
-    )
-    parser.add_argument("--port", type=int, default=3101, help="Port for HTTP transports")
     return parser
+
+
+def _resolve_forbid_regex_rules(cli_value: bool | None) -> bool:
+    if cli_value is not None:
+        return cli_value
+    return _environment_bool("AST_GREP_FORBID_REGEX_RULES")
 
 
 def run_mcp_server() -> None:
@@ -865,13 +1688,12 @@ def run_mcp_server() -> None:
             command_timeout_seconds=args.command_timeout,
             default_max_results=args.default_max_results,
             max_results_cap=args.max_results_cap,
-            forbid_regex_rules=args.forbid_regex_rules,
+            forbid_regex_rules=_resolve_forbid_regex_rules(args.forbid_regex_rules),
         )
     except (RuntimeError, ValueError) as error:
         parser.error(str(error))
     configure_runtime(runtime)
-    mcp.settings.port = args.port
-    mcp.run(transport=args.transport)
+    mcp.run()
 
 
 if __name__ == "__main__":
