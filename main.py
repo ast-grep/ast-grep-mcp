@@ -384,7 +384,9 @@ def validate_process_budget(
     detected_arg_max = arg_max
     if detected_arg_max is None:
         try:
-            detected_arg_max = int(os.sysconf("SC_ARG_MAX"))
+            # POSIX-only. Unreachable on Windows through the check above, but that check reads a
+            # runtime-parameterized value, so mypy cannot narrow it. AttributeError is caught.
+            detected_arg_max = int(os.sysconf("SC_ARG_MAX"))  # type: ignore[attr-defined]
         except (AttributeError, OSError, ValueError) as error:
             raise ValueError("Could not determine the POSIX ARG_MAX process-launch budget") from error
     if detected_arg_max <= POSIX_ARG_HEADROOM_BYTES:
@@ -688,7 +690,9 @@ def _terminate_and_reap(process: subprocess.Popen[Any]) -> None:
     signaled_group = False
     if os.name == "posix":
         try:
-            os.killpg(process.pid, signal.SIGTERM)
+            # POSIX-only names. mypy narrows platform branches on sys.platform, not os.name,
+            # so it cannot see that this block is unreachable on Windows.
+            os.killpg(process.pid, signal.SIGTERM)  # type: ignore[attr-defined]
             signaled_group = True
         except OSError:
             pass
@@ -712,7 +716,7 @@ def _terminate_and_reap(process: subprocess.Popen[Any]) -> None:
 
     if os.name == "posix":
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            os.killpg(process.pid, signal.SIGKILL)  # type: ignore[attr-defined]
         except OSError:
             pass
     try:
