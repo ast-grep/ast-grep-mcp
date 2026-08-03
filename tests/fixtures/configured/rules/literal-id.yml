@@ -1,0 +1,6 @@
+id: literal.dot+id
+language: Python
+message: Literal identifier assignment
+severity: info
+rule:
+  pattern: literal_id = $VALUE

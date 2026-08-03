@@ -1,0 +1,5 @@
+id: configured-print
+valid:
+  - value = 1
+invalid:
+  - print('value')

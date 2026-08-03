@@ -1,0 +1,8 @@
+id: configured-print
+language: Python
+message: Configured print call
+severity: warning
+metadata:
+  category: integration
+rule:
+  matches: is-print-call

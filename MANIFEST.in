@@ -1,0 +1,4 @@
+include AGENTS.md
+include ast-grep.mdc
+recursive-include scripts *.py
+recursive-include tests *.py *.yml

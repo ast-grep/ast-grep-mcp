@@ -4,10 +4,25 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sg-mcp"
-version = "0.3.0"
+version = "0.4.0"
 description = "A bounded, read-only ast-grep MCP server"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.14"
+license = "MIT"
+license-files = ["LICENSE"]
+maintainers = [
+    { name = "John McLaughlin", email = "31931302+jmclaughlin724@users.noreply.github.com" },
+]
+keywords = ["ast-grep", "mcp", "static-analysis", "structural-search"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Quality Assurance",
+]
 dependencies = [
     "mcp[cli]==2.0.0",
     "pydantic>=2.11.0,<3",
@@ -16,34 +31,49 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "bashlex==0.18",
+    "markdown-it-py>=3,<4",
     "pytest>=8.0.0",
     "pytest-cov>=5.0.0",
     "pytest-mock>=3.14.0",
     "pytest-asyncio>=1.0.0",
-    "ruff>=0.7.0",
-    "mypy>=1.13.0",
+    "ruff>=0.16.1",
+    "mypy>=1.17.1",
+    "pyright==1.1.411",
     "types-pyyaml>=6.0.12.20250809",
+    "build>=1.3.0,<2",
+    "check-wheel-contents>=0.6.3,<1",
+    "setuptools>=77",
+    "twine>=6.2.0,<7",
 ]
+
+[project.urls]
+Repository = "https://github.com/jmclaughlin724/ast-grep-mcp"
+Issues = "https://github.com/jmclaughlin724/ast-grep-mcp/issues"
 
 [project.scripts]
 ast-grep-server = "main:run_mcp_server"
 
 [tool.setuptools]
-py-modules = ["main"]
+py-modules = ["main", "config_snapshot"]
+
+[tool.check-wheel-contents]
+toplevel = ["main.py", "config_snapshot.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v"
+addopts = "-v --basetemp=test-runtime"
 asyncio_mode = "auto"
 
 [tool.coverage.run]
-source = ["main"]
+source = ["main", "config_snapshot"]
 omit = ["tests/*"]
 
 [tool.coverage.report]
+fail_under = 84
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",
@@ -55,13 +85,14 @@ exclude_lines = [
 
 [tool.ruff]
 line-length = 140
-target-version = "py313"
+target-version = "py314"
 
 [tool.ruff.lint]
 select = ["B", "E", "F", "I", "N", "RUF", "UP", "W"]
 
 [tool.mypy]
-python_version = "3.13"
+python_version = "3.14"
+exclude = ["^tests/fixtures/"]
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false

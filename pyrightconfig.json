@@ -1,0 +1,8 @@
+{
+  "include": ["main.py", "config_snapshot.py", "scripts"],
+  "typeCheckingMode": "strict",
+  "reportUnusedFunction": "none",
+  "pythonVersion": "3.14",
+  "venvPath": ".",
+  "venv": ".venv"
+}

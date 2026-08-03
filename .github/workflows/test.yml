@@ -1,14 +1,13 @@
-# https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions
 name: Tests
 
 permissions:
   contents: read
 
-on:  # https://docs.github.com/en/actions/reference/events-that-trigger-workflows
+'on':
   push:
     branches:
     - '**'
-    tags-ignore:  # don't build tags
+    tags-ignore:
     - '**'
     paths-ignore:
     - '**/*.md'
@@ -16,11 +15,13 @@ on:  # https://docs.github.com/en/actions/reference/events-that-trigger-workflow
     paths-ignore:
     - '**/*.md'
   workflow_dispatch:
-    # https://docs.github.com/en/actions/reference/events-that-trigger-workflows#workflow_dispatch
 
 defaults:
   run:
     shell: bash
+
+env:
+  UV_PROJECT_ENVIRONMENT: .venv
 
 jobs:
   test:
@@ -32,29 +33,31 @@ jobs:
 
     steps:
     - name: Git Checkout
-      uses: actions/checkout@v6  # https://github.com/actions/checkout
+      uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+    - name: Set up Python
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version-file: .python-version
 
     - name: Install uv
-      uses: astral-sh/setup-uv@v7
+      uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
       with:
         enable-cache: true
 
-    - name: Set up Python
-      run: uv python install
-
     - name: Install dependencies
       run: |
-        uv sync --frozen --all-extras --dev
+        uv sync --locked --all-extras --dev --no-build-isolation --no-python-downloads
+
+    - name: Verify repository environment
+      run: uv run --no-sync python scripts/verify_environment.py
 
     - name: Verify lock file
       run: uv lock --check
 
     - name: Install and verify ast-grep
       run: |
-        # main.SUPPORTED_AST_GREP_VERSION is the sole owner of this version: the
-        # server refuses to start against any other ast-grep. Reading it here
-        # keeps CI from installing a version the runtime would reject.
-        version="$(uv run --frozen python -c 'import main; print(main.SUPPORTED_AST_GREP_VERSION)')"
+        version="$(uv run --no-sync python -c 'import main; print(main.SUPPORTED_AST_GREP_VERSION)')"
         npm install \
           --prefix .ci-tools \
           --no-save \
@@ -76,24 +79,31 @@ jobs:
 
     - name: Lint with ruff
       run: |
-        uv run --frozen ruff check .
+        uv run --no-sync ruff check .
 
     - name: Format check with ruff
       run: |
-        uv run --frozen ruff format --check .
+        uv run --no-sync ruff format --check .
 
     - name: Type check with mypy
       run: |
-        uv run --frozen mypy main.py tests
+        uv run --no-sync mypy main.py config_snapshot.py scripts tests
+
+    - name: Type check with pyright
+      run: |
+        uv run --no-sync pyright
 
     - name: Smoke test packaged entry point
       run: |
-        uv run --frozen ast-grep-server --help
+        uv run --no-sync ast-grep-server --help
+
+    - name: Smoke test repository launcher
+      run: uv run --no-sync python scripts/launch_server.py --help
 
     - name: Run unit tests
       run: |
-        uv run --frozen pytest tests/test_unit.py -v --cov=main --cov-report=term-missing
+        uv run --no-sync pytest tests/test_unit.py tests/test_config_snapshot.py tests/test_environment_policy.py -v --cov=main --cov=config_snapshot --cov-report=term-missing
 
     - name: Run integration tests
       run: |
-        uv run --frozen pytest tests/test_integration.py -v
+        uv run --no-sync pytest tests/test_integration.py -v
