@@ -101,8 +101,12 @@ jobs:
       run: uv run --no-sync python scripts/launch_server.py --help
 
     - name: Run unit tests
+      env:
+        # config_snapshot.py's dir_fd copy walker is POSIX-only and unreachable on
+        # Windows, so the shared threshold is enforced on Linux and macOS instead.
+        COVERAGE_THRESHOLD: ${{ runner.os == 'Windows' && '0' || '84' }}
       run: |
-        uv run --no-sync pytest tests/test_unit.py tests/test_config_snapshot.py tests/test_environment_policy.py -v --cov=main --cov=config_snapshot --cov-report=term-missing
+        uv run --no-sync pytest tests/test_unit.py tests/test_config_snapshot.py tests/test_environment_policy.py -v --cov=main --cov=config_snapshot --cov-report=term-missing --cov-fail-under "$COVERAGE_THRESHOLD"
 
     - name: Run integration tests
       run: |
