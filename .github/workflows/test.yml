@@ -47,7 +47,7 @@ jobs:
 
     - name: Install dependencies
       run: |
-        uv sync --locked --all-extras --dev --no-build-isolation --no-python-downloads
+        uv sync --locked --all-extras --dev --no-python-downloads
 
     - name: Verify repository environment
       run: uv run --no-sync python scripts/verify_environment.py
