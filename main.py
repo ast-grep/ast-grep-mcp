@@ -321,8 +321,10 @@ def _requires_node(executable: Path) -> bool:
 
 def resolve_ast_grep_executable(raw_executable: str, *, working_directory: Path) -> ResolvedExecutable:
     raw_path = Path(raw_executable).expanduser()
-    alternate_separator = cast(str | None, getattr(os, "altsep", None))
-    has_path_separator = os.sep in raw_executable or (alternate_separator is not None and alternate_separator in raw_executable)
+    if sys.platform == "win32":
+        has_path_separator = os.sep in raw_executable or os.altsep in raw_executable
+    else:
+        has_path_separator = os.sep in raw_executable
     if raw_path.is_absolute() or has_path_separator:
         shim_path = raw_path if raw_path.is_absolute() else working_directory / raw_path
         if not shim_path.exists():
