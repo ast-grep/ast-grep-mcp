@@ -519,7 +519,11 @@ def test_preview_rewrites_transformations_and_deletions_never_change_source(
     )
 
     assert replacement["matches"][0]["replacement"] == "logger.info(value)"
-    assert replacement["matches"][0]["replacementOffsets"] == {"start": 12, "end": 24}
+    matched_start = source.read_bytes().index(b"print(value)")
+    assert replacement["matches"][0]["replacementOffsets"] == {
+        "start": matched_start,
+        "end": matched_start + len(b"print(value)"),
+    }
     assert deletion["matches"][0]["replacement"] == ""
     assert transformed["matches"][0]["metaVariables"]["transformed"] == {"B": "one"}
     assert transformed["matches"][0]["replacement"] == "value = one"
