@@ -14,3 +14,7 @@ wheels/
 # Virtual environments
 .venv
 /.project-sast-runtime/
+
+# Local environment files
+.env.local
+.envrc
