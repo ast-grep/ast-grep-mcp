@@ -10,7 +10,7 @@ Install these runtime dependencies:
 - [uv](https://docs.astral.sh/uv/)
 - ast-grep 0.45.0
 
-The server rejects every ast-grep version other than 0.45.0. Install and verify the tested command-line interface (CLI) release:
+The server rejects every ast-grep version other than 0.45.0. `SUPPORTED_AST_GREP_VERSION` in `main.py` owns that version: the test suites and the CI workflow both read it, so a bump changes one line of code and the prose below. Install and verify the tested command-line interface (CLI) release:
 
 ```bash
 npm install --global @ast-grep/cli@0.45.0

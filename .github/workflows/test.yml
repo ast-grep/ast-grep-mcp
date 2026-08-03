@@ -4,9 +4,6 @@ name: Tests
 permissions:
   contents: read
 
-env:
-  AST_GREP_VERSION: 0.45.0
-
 on:  # https://docs.github.com/en/actions/reference/events-that-trigger-workflows
   push:
     branches:
@@ -54,11 +51,15 @@ jobs:
 
     - name: Install and verify ast-grep
       run: |
+        # main.SUPPORTED_AST_GREP_VERSION is the sole owner of this version: the
+        # server refuses to start against any other ast-grep. Reading it here
+        # keeps CI from installing a version the runtime would reject.
+        version="$(uv run --frozen python -c 'import main; print(main.SUPPORTED_AST_GREP_VERSION)')"
         npm install \
           --prefix .ci-tools \
           --no-save \
           --package-lock=false \
-          "@ast-grep/cli@${AST_GREP_VERSION}"
+          "@ast-grep/cli@${version}"
         executable="$(node -e '
           const path = require("node:path")
           const name = process.platform === "win32" ? "ast-grep.cmd" : "ast-grep"
@@ -70,7 +71,7 @@ jobs:
         ' "$executable"
         export PATH="$PWD/.ci-tools/node_modules/.bin:$PATH"
         reported_version="$(ast-grep --version)"
-        test "$reported_version" = "ast-grep $AST_GREP_VERSION"
+        test "$reported_version" = "ast-grep $version"
         printf 'AST_GREP_TEST_EXECUTABLE=%s\n' "$executable" >> "$GITHUB_ENV"
 
     - name: Lint with ruff
