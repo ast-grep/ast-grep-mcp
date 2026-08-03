@@ -19,7 +19,7 @@ ProjectSAST is a bounded, read-only [Model Context Protocol](https://modelcontex
 Install the locked Python environment and exact native CLI:
 
 ```bash
-uv sync --locked --all-extras --dev --no-build-isolation --no-python-downloads
+uv sync --locked --all-extras --dev --no-python-downloads
 npm install --global @ast-grep/cli@0.45.0
 ast-grep --version
 ```
@@ -181,7 +181,7 @@ It also does not add `inspect_syntax`. Although `ast-grep-py==0.45.0` exists, it
 ## Develop and verify
 
 ```bash
-uv sync --locked --all-extras --dev --no-build-isolation --no-python-downloads
+uv sync --locked --all-extras --dev --no-python-downloads
 uv run --no-sync python scripts/verify_environment.py
 uv lock --check
 uv run --no-sync ruff check .
