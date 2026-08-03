@@ -1,29 +1,29 @@
-# ast-grep MCP Server
+# Inspect code with ProjectSAST
 
-A bounded, read-only [Model Context Protocol](https://modelcontextprotocol.io/) server for structural code inspection with [ast-grep](https://ast-grep.github.io/).
-
-The server is designed for model-facing exploration: inspect syntax, test a rule against a snippet, then search a deliberately constrained project scope. It does not expose rewriting or editing tools. Exhaustive scans and authorized rewrites remain CLI workflows.
+ProjectSAST is a bounded, read-only [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for structural code inspection with [ast-grep](https://ast-grep.github.io/). It exposes six tools over standard input/output (stdio), performs no rewrites, and constrains every caller-selected project artifact to configured roots.
 
 ## Requirements
 
+Install these runtime dependencies:
+
 - Python 3.13 or newer
 - [uv](https://docs.astral.sh/uv/)
-- ast-grep 0.45.0 (the server rejects version drift)
+- ast-grep 0.45.0
 
-Install the tested ast-grep CLI with npm:
+The server rejects every ast-grep version other than 0.45.0. Install and verify the tested command-line interface (CLI) release:
 
 ```bash
 npm install --global @ast-grep/cli@0.45.0
 ast-grep --version
 ```
 
-## Run from an immutable fork revision
+## Run the stdio server
 
-Pin MCP consumers to a commit SHA:
+Pin MCP consumers to an immutable commit SHA:
 
 ```bash
 uvx \
-  --from git+https://github.com/jmclaughlin724/ast-grep-mcp@<commit-sha> \
+  --from git+https://github.com/jmclaughlin724/ast-grep-mcp@commit_sha \
   ast-grep-server \
   --ast-grep /absolute/path/to/ast-grep \
   --allowed-root /absolute/path/to/project \
@@ -31,73 +31,73 @@ uvx \
   --forbid-regex-rules
 ```
 
-`--allowed-root` is repeatable. When omitted, it defaults to the process working directory. Every project, search path, symlink target, and config path is resolved before use and must remain inside an allowed root.
+ProjectSAST supports stdio only. It doesn't expose Server-Sent Events (SSE), Streamable HTTP, a transport selector, or a network port.
 
-## Server options
+## Configure the server
+
+These command arguments define the runtime contract:
 
 | Option | Default | Purpose |
 | --- | --- | --- |
-| `--ast-grep PATH` | `ast-grep` | Resolve the exact CLI instead of trusting a later `PATH` lookup. |
-| `--allowed-root PATH` | process working directory | Permit searches only inside this real path; repeat to add roots. |
-| `--config PATH` | unset | Use one contained `sgconfig.yml`. |
-| `--command-timeout SECONDS` | `30` | Bound every ast-grep subprocess. |
-| `--default-max-results COUNT` | `50` | Set the finite result limit used when a tool call omits it. |
-| `--max-results-cap COUNT` | `500` | Cap caller-selected limits; values above 500 are rejected. |
-| `--forbid-regex-rules` | off | Reject inline YAML containing ast-grep `regex` matcher keys. |
-| `--transport` | `stdio` | Select `stdio`, `sse`, or `streamable-http`. |
+| `--ast-grep PATH` | `ast-grep` | Resolve one ast-grep executable before serving requests. |
+| `--allowed-root PATH` | Process working directory | Permit projects only inside this real path. Repeat the option to add roots. |
+| `--config PATH` | Unset | Use one contained `sgconfig.yml`, including configured custom languages. |
+| `--command-timeout SECONDS` | `30` | Bound each ast-grep subprocess. |
+| `--default-max-results COUNT` | `50` | Set the finite result limit used when a call omits `max_results`. |
+| `--max-results-cap COUNT` | `500` | Lower the runtime ceiling for caller-selected result limits. |
+| `--forbid-regex-rules` | Off | Reject inline YAML containing an ast-grep `regex` matcher key. |
 
-Equivalent environment variables exist for the ast-grep executable, config, timeout, result limits, and regex-rule policy. Use command arguments in checked-in MCP launchers so the effective security contract stays visible.
+Equivalent environment variables configure the executable, config, timeout, result limits, and regex policy. Prefer arguments in checked-in launchers so reviewers can see the effective contract.
 
-## Tools
+The static MCP schemas allow `max_results` values through 500. An operator can configure a lower runtime cap. `get_server_info` reports that cap, and calls above it fail validation.
 
-All tools advertise these MCP annotations:
+## Understand containment and input limits
 
-- read-only
-- non-destructive
-- idempotent
-- closed-world
+Project, search, outline, symlink-target, and config paths resolve before use. Caller-controlled paths and configs must stay inside an allowed root. Search paths stay inside the selected project.
+
+`dump_syntax_tree` uses a fresh, empty internal temporary directory. That sandbox can sit outside the allowed roots because it contains no user files. The server removes it after the syntax probe, including error paths.
+
+Inline YAML has a 64 KiB input limit. This limit doesn't guarantee that the resulting subprocess command fits the operating system's launch budget. Before launch, the server budgets the fully quoted command and environment. Windows limits the complete command line to 32,767 characters; POSIX systems derive their available argument and environment budget from `SC_ARG_MAX`. A request that exceeds the platform budget fails before process creation with an actionable validation error.
+
+## Use the six tools
+
+Every tool advertises read-only, non-destructive, idempotent, and closed-world MCP annotations.
 
 ### `dump_syntax_tree`
 
-Inspect how ast-grep parses code or a query pattern. Use `cst` for concrete target syntax and `pattern` while developing a query.
+Inspect how ast-grep parses code or a query pattern. Select `cst` for concrete target syntax and `pattern` while developing a structural query.
 
 ### `test_match_code_rule`
 
-Test YAML with `id`, `language`, and `rule` fields against a code snippet. A valid negative probe returns an empty match list instead of an error.
+Test inline YAML with `id`, `language`, and `rule` fields against a code snippet. A valid negative probe returns an empty match list.
 
 ### `find_code`
 
-Search with a complete structural pattern and an explicit language. The tool accepts:
-
-- `project_folder`
-- relative `paths`
-- `include_globs`
-- `exclude_globs`
-- finite `max_results`
-- `output_format` (`text` or `json`)
-
-Pattern searches are compiled into inline rules and run with `ast-grep scan --max-results <limit+1>`. This stops work early and reports truncation without scanning the entire tree.
+Search with a complete structural pattern and an explicit language. Select relative paths, include and exclude globs, a finite result limit, and `text` or `json` output. The result envelope is bounded; that bound doesn't claim the native ast-grep traversal stops as soon as the envelope fills.
 
 ### `find_code_by_rule`
 
-Search with one or more inline YAML rules using the same path, glob, result-limit, and output controls.
+Search with one or more inline YAML rules and the same path, glob, result-limit, and output controls. Set `include_metadata=true` to forward ast-grep's documented `--include-metadata` flag and retain each rule's metadata in structured matches. SARIF and GitHub output remain CLI-only workflows.
 
 ### `get_server_info`
 
-Report the fork version, resolved ast-grep executable and version, config path, allowed roots, command timeout, effective result limits, and regex-rule policy.
+Read the package version, resolved ast-grep identity, config, allowed roots, timeout, runtime result limits, and regex policy.
 
-## Search results
+### `outline_code`
 
-Compact text is the default model-facing format:
+Read per-file symbol hierarchies for 1 to 64 relative regular files. Directories, absolute paths, paths outside the project, and escaping symlinks are rejected. You can set an explicit language, choose `text` or `json`, and request a finite `max_results`.
 
-```text
-Found 2 matches (limit 2; additional matches exist):
+The limit counts every emitted outline node recursively, including nested members. The response preserves each file's hierarchy and reports `returned`, `truncated`, and `limit`. ProjectSAST reads ast-grep's `--json=stream` output with these bounds:
 
-src/example.ts:4
-loadData()
-```
+- 1 MiB per newline-delimited JSON (NDJSON) record
+- 4 MiB across all records
+- The configured runtime result ceiling
 
-JSON results have one stable envelope:
+The adapter terminates and reaps ast-grep after it observes node `limit + 1`. Malformed, non-object, oversized, or incomplete records fail closed.
+
+## Read search and outline results
+
+Text is the default model-facing format. JSON search results use this envelope:
 
 ```json
 {
@@ -108,18 +108,21 @@ JSON results have one stable envelope:
 }
 ```
 
-The server never offers zero or unlimited searches. It returns project-relative match paths and rejects results that resolve outside the selected project.
+The server returns project-relative file paths and rejects results that resolve outside the selected project. Outline JSON uses the same result metadata with a per-file hierarchy instead of a flat `matches` list.
 
-## Development
+## Develop and verify
+
+Install the locked environment and run the owner checks:
 
 ```bash
 uv sync --frozen --all-extras --dev
 uv run ruff check .
 uv run ruff format --check .
-uv run mypy main.py
-uv run pytest
+uv run mypy main.py tests
+AST_GREP_TEST_EXECUTABLE=/absolute/path/to/ast-grep uv run pytest
+uv lock --check
 ```
 
-The integration suite launches the real STDIO server, negotiates MCP, inspects the exact tool catalog and annotations, calls metadata and search tools, and verifies ast-grep 0.45.0.
+`AST_GREP_TEST_EXECUTABLE` is mandatory for integration acceptance. The suite executes its `--version` command and fails unless it reports exactly `ast-grep 0.45.0`. Protocol tests launch the installed `ast-grep-server` console entrypoint, negotiate both modern `mode="auto"` and handshake-era `mode="legacy"` MCP connections, inspect the six-tool catalog, and exercise representative calls.
 
-For rule design, follow ast-grep's [AI prompting workflow](https://astgrep.com/advanced/prompting.html), [rule testing guidance](https://astgrep.com/guide/test-rule.html), and [rewriting guide](https://astgrep.com/guide/rewrite-code.html). Rewriting is intentionally outside this MCP server.
+For rule design, use ast-grep's [AI prompting workflow](https://astgrep.com/advanced/prompting.html), [rule testing guidance](https://astgrep.com/guide/test-rule.html), and [rewriting guide](https://astgrep.com/guide/rewrite-code.html). Rewriting and exhaustive project workflows remain outside this MCP server.

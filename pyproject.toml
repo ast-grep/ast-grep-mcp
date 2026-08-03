@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sg-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "A bounded, read-only ast-grep MCP server"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "mcp[cli]==1.27.2",
+    "mcp[cli]==2.0.0",
     "pydantic>=2.11.0,<3",
     "pyyaml>=6.0.2,<7",
 ]
