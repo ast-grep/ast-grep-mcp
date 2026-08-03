@@ -458,7 +458,7 @@ def test_preview_rewrites_transformations_and_deletions_never_change_source(
     ast_grep_executable: str,
 ) -> None:
     source = tmp_path / "sample.ts"
-    source.write_text("value = 123\nprint(value)\nconst typed: number = 456;\n", encoding="utf-8")
+    source.write_text("value = 123\nprint(value)\nconst typed: number = 456;\n", encoding="utf-8", newline="")
     before = hashlib.sha256(source.read_bytes()).hexdigest()
     service = actual_service(tmp_path, ast_grep_executable)
 
