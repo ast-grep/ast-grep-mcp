@@ -463,10 +463,12 @@ import sys
 import time
 
 subprocess.Popen([sys.executable, "-c", sys.argv[3], sys.argv[2]])
+# Record identity before waiting on the descendant. The reap timeout can fire while
+# this process is still waiting, and the test needs the pid either way.
+pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding="utf-8")
 deadline = time.monotonic() + 5
 while not pathlib.Path(sys.argv[2]).exists() and time.monotonic() < deadline:
     time.sleep(0.01)
-pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding="utf-8")
 time.sleep(30)
 """
     started = time.monotonic()
@@ -481,7 +483,7 @@ time.sleep(30)
                 str(descendant_port_path),
                 descendant_listener_program(),
             ],
-            timeout_seconds=0.5,
+            timeout_seconds=3.0,
         )
 
     assert time.monotonic() - started < 5
@@ -615,10 +617,12 @@ import sys
 import time
 
 subprocess.Popen([sys.executable, "-c", sys.argv[3], sys.argv[2]])
+# Record identity before waiting on the descendant. The reap timeout can fire while
+# this process is still waiting, and the test needs the pid either way.
+pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding="utf-8")
 deadline = time.monotonic() + 5
 while not pathlib.Path(sys.argv[2]).exists() and time.monotonic() < deadline:
     time.sleep(0.01)
-pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding="utf-8")
 time.sleep(30)
 """
     command = [
@@ -633,7 +637,7 @@ time.sleep(30)
     with pytest.raises(RuntimeError, match="timed out"):
         run_outline_process(
             command,
-            timeout_seconds=0.5,
+            timeout_seconds=3.0,
             working_directory=tmp_path,
             node_limit=10,
         )
