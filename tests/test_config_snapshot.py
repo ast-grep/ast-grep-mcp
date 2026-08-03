@@ -17,7 +17,7 @@ from main import validate_rule_yaml
 
 def write_project_config(root: Path, config: str) -> Path:
     path = root / "sgconfig.yml"
-    path.write_text(config, encoding="utf-8")
+    path.write_text(config, encoding="utf-8", newline="")
     return path
 
 
@@ -257,7 +257,7 @@ def test_snapshot_fallback_copy_rejects_links_and_retains_regular_files(
     rules = tmp_path / "rules"
     rules.mkdir()
     rule = rules / "rule.yml"
-    rule.write_text("id: safe\nlanguage: Python\nrule: {kind: identifier}\n", encoding="utf-8")
+    rule.write_text("id: safe\nlanguage: Python\nrule: {kind: identifier}\n", encoding="utf-8", newline="")
 
     snapshot = create_snapshot(tmp_path, "ruleDirs: [rules]\n")
     try:
@@ -302,7 +302,7 @@ def test_snapshot_rejects_a_resource_directory_swapped_to_a_symlink(
 
 @pytest.mark.parametrize("entry", ["../outside", "/outside"])
 def test_snapshot_rejects_resource_path_escapes(tmp_path: Path, entry: str) -> None:
-    with pytest.raises(ValueError, match=r"contained relative path|outside the allowed roots"):
+    with pytest.raises(ValueError, match=r"contained relative path|outside the allowed roots|escapes its permitted directory"):
         create_snapshot(tmp_path, f"ruleDirs: [{entry!r}]\n")
 
 
