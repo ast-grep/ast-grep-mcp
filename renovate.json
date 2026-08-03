@@ -2,5 +2,21 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
+  ],
+  "packageRules": [
+    {
+      "description": "mcp is pinned exactly (mcp[cli]==2.0.0) because SDK majors require source migration, not just a version bump. Hold major updates for explicit Dependency Dashboard approval and label them so they can never land as a routine bump.",
+      "matchPackageNames": [
+        "mcp"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "dependencyDashboardApproval": true,
+      "addLabels": [
+        "mcp-sdk-major",
+        "needs-source-migration"
+      ]
+    }
   ]
 }
