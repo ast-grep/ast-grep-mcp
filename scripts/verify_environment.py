@@ -525,8 +525,9 @@ def _workflow_policy_failures(path: Path) -> list[str]:
 
 
 def static_policy_failures() -> list[str]:
-    failures = _markdown_policy_failures(ROOT / "README.md")
-    failures.extend(_markdown_policy_failures(ROOT / "AGENTS.md"))
+    failures: list[str] = []
+    for path in sorted(ROOT.glob("*.md")):
+        failures.extend(_markdown_policy_failures(path))
     for path in sorted((ROOT / ".github" / "workflows").glob("*.y*ml")):
         failures.extend(_workflow_policy_failures(path))
     for path in sorted((ROOT / "scripts").rglob("*")):

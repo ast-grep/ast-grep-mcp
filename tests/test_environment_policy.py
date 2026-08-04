@@ -138,6 +138,17 @@ def test_current_verification_surfaces_follow_environment_policy() -> None:
     assert verify_environment.static_policy_failures() == []
 
 
+def test_environment_policy_scans_every_root_markdown_document(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Root documents are discovered rather than listed, so a new one cannot escape the scan."""
+    (tmp_path / "CONTRIBUTING.md").write_text("Run it:\n\n```bash\nuvx ast-grep-server\n```\n", encoding="utf-8")
+    monkeypatch.setattr(verify_environment, "ROOT", tmp_path)
+
+    failures = verify_environment.static_policy_failures()
+
+    assert any(failure.endswith("cache-isolated tool execution") for failure in failures)
+    assert any(failure.startswith("CONTRIBUTING.md:") for failure in failures)
+
+
 def test_repository_python_carries_no_comment_tokens() -> None:
     root = verify_environment.ROOT
     sources = [root / "main.py", root / "config_snapshot.py"]
