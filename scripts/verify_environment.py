@@ -36,6 +36,8 @@ PROCESS_CALLS: Final = frozenset(
         "subprocess.check_output",
         "subprocess.Popen",
         "subprocess.run",
+        "main.run_ndjson_process",
+        "main.run_text_process",
         "run_ndjson_process",
         "run_text_process",
     }
@@ -48,6 +50,7 @@ SHELL_PROCESS_CALLS: Final = frozenset(
     }
 )
 TEMPORARY_APIS: Final = frozenset({"tempfile.mkdtemp", "tempfile.TemporaryDirectory"})
+ARGV_KEYWORDS: Final = frozenset({"args", "command"})
 
 
 def resolve_from_root(value: str) -> Path:
@@ -218,8 +221,11 @@ def _argv_policy_failures(argv: Sequence[str], *, location: str) -> list[str]:
                 ):
                     label = "active environment override" if "--active" in uv_arguments else "isolated run environment"
                     failures.append(f"{location}: {label}")
-            elif subcommand == "sync" and "--active" in uv_arguments:
-                failures.append(f"{location}: active environment override")
+            elif subcommand == "sync":
+                if "--active" in uv_arguments:
+                    failures.append(f"{location}: active environment override")
+                if "--no-build-isolation" in uv_arguments:
+                    failures.append(f"{location}: disabled build isolation")
     return list(dict.fromkeys(failures))
 
 
@@ -287,6 +293,13 @@ def _resolve_dotted_name(node: ast.expr, aliases: Mapping[str, str]) -> str | No
     return f"{resolved}.{tail}" if separator else resolved
 
 
+def _keyword_argument(node: ast.Call, names: frozenset[str]) -> ast.expr | None:
+    for keyword in node.keywords:
+        if keyword.arg in names:
+            return keyword.value
+    return None
+
+
 def _literal_argv(node: ast.expr) -> list[str] | None:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return [node.value]
@@ -322,9 +335,12 @@ def python_source_policy_failures(source: str, *, label: str, line_offset: int =
         if name in TEMPORARY_APIS:
             failures.append(f"{location}: temporary workspace creation")
             continue
-        if name not in PROCESS_CALLS or not node.args:
+        if name not in PROCESS_CALLS:
             continue
-        argv = _literal_argv(node.args[0])
+        argument = node.args[0] if node.args else _keyword_argument(node, ARGV_KEYWORDS)
+        if argument is None:
+            continue
+        argv = _literal_argv(argument)
         if argv is None:
             continue
         if name in SHELL_PROCESS_CALLS and len(argv) == 1:

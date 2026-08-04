@@ -62,6 +62,7 @@ verify_environment = _load_environment_policy()
         ("export UV_PROJECT_ENVIRONMENT=../outside", "alternate UV_PROJECT_ENVIRONMENT"),
         ("VIRTUAL_ENV=.venv uv run pytest", "virtual environment override"),
         ("sh -c 'echo $(uvx ast-grep-server)'", "cache-isolated tool execution"),
+        ("uv sync --locked --all-extras --dev --no-build-isolation --no-python-downloads", "disabled build isolation"),
     ],
 )
 def test_forbidden_shell_commands_are_detected_structurally(command: str, label: str) -> None:
@@ -72,7 +73,7 @@ def test_forbidden_shell_commands_are_detected_structurally(command: str, label:
 @pytest.mark.parametrize(
     "command",
     [
-        "uv sync --locked --all-extras --dev --no-build-isolation --no-python-downloads",
+        "uv sync --locked --all-extras --dev --no-python-downloads",
         "UV_PROJECT_ENVIRONMENT=.venv uv run --no-sync pytest",
         "env UV_PROJECT_ENVIRONMENT=.venv uv --directory . run --no-sync python scripts/launch_server.py",
         "mkdir -p test-runtime",
@@ -100,6 +101,9 @@ def test_shell_parser_fails_closed_on_invalid_syntax() -> None:
         ("from tempfile import TemporaryDirectory as TD\nTD()\n", "temporary workspace creation"),
         ("import subprocess as process\nprocess.run(['uvx', 'ast-grep-server'])\n", "cache-isolated tool execution"),
         ("import os\nos.system('uv run --isolated pytest')\n", "isolated run environment"),
+        ("import subprocess\nsubprocess.run(args=['uvx', 'ast-grep-server'])\n", "cache-isolated tool execution"),
+        ("import subprocess\nsubprocess.Popen(args=['mktemp', '-d'])\n", "temporary workspace creation"),
+        ("from main import run_text_process\nrun_text_process(command=['uvx', 'ast-grep-server'])\n", "cache-isolated tool execution"),
     ],
 )
 def test_forbidden_python_calls_are_detected_by_ast(source: str, label: str) -> None:
