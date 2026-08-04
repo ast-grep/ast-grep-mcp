@@ -55,19 +55,21 @@ def _sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _directory_identity(directory: Path) -> tuple[int, int]:
-    """Identify a directory by device and inode so a swapped path is detectable.
+def _directory_identity(directory: Path) -> tuple[int, int, int]:
+    """Identify a directory by device, inode, and type so a swapped path is detectable.
 
     The descriptor walker holds an O_NOFOLLOW handle, so the directory it reads
     is the directory it validated. The fallback reopens by name and cannot rely
     on that, leaving a window where the path may be replaced with a link to
-    another tree between validation and traversal.
+    another tree between validation and traversal. Deleting a directory frees its
+    inode for immediate reuse, and a replacement link can be handed the same
+    number, so the file type is carried alongside it.
     """
     try:
         metadata = os.stat(directory, follow_symlinks=False)
     except OSError as error:
         raise ValueError(f"Could not inspect configuration resource directory: {directory}") from error
-    return metadata.st_dev, metadata.st_ino
+    return metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode)
 
 
 def _count_visited_entry(writer: _BundleWriter, display_path: Path) -> None:
@@ -509,8 +511,6 @@ def _copy_directory(
     pending = [(source, _directory_identity(source))]
     while pending:
         directory, expected_identity = pending.pop()
-        if _directory_identity(directory) != expected_identity:
-            raise ValueError(f"Configuration resource directory changed during traversal: {directory}")
         try:
             entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
         except OSError as error:
@@ -527,7 +527,7 @@ def _copy_directory(
             if _is_link_like(metadata):
                 raise ValueError(f"Configuration resources cannot contain symlinks or reparse points: {entry_path}")
             if stat.S_ISDIR(metadata.st_mode):
-                pending.append((entry_path, (metadata.st_dev, metadata.st_ino)))
+                pending.append((entry_path, (metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode))))
                 continue
             if not stat.S_ISREG(metadata.st_mode):
                 raise ValueError(f"Configuration resources must be regular files: {entry_path}")
