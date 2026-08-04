@@ -526,7 +526,8 @@ def test_runtime_bundle_does_not_require_the_working_directory_to_be_inspectable
     runtime_root = snapshot_module.private_runtime_root(server, (project.resolve(),))
 
     assert runtime_root == server.resolve() / snapshot_module.RUNTIME_DIRECTORY_NAME
-    assert stat.S_IMODE(runtime_root.lstat().st_mode) == 0o700
+    if os.name == "posix":
+        assert stat.S_IMODE(runtime_root.lstat().st_mode) == 0o700
     runtime_root.rmdir()
     runtime_root.symlink_to(project, target_is_directory=True)
     with pytest.raises(ValueError, match="must be a real directory"):
@@ -557,9 +558,12 @@ def test_snapshot_fallback_rejects_a_directory_swapped_after_validation(
     (outside / "escaped.yml").write_text("id: escaped\n", encoding="utf-8", newline="")
 
     real_scandir = snapshot_module.os.scandir
+    swapped = False
 
     def swap_on_reopen(target: Any) -> Any:
-        if isinstance(target, (str, Path)) and os.path.basename(str(target)) == nested.name and not nested.is_symlink():
+        nonlocal swapped
+        if not swapped and isinstance(target, (str, Path)) and os.path.basename(str(target)) == nested.name:
+            swapped = True
             shutil.rmtree(nested)
             nested.symlink_to(outside, target_is_directory=True)
         return real_scandir(target)
