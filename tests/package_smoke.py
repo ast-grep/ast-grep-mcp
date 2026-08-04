@@ -96,6 +96,8 @@ def _check_sdist(sdist: Path, expected_version: str) -> None:
         f"{expected_root}/config_snapshot.py",
         f"{expected_root}/main.py",
         f"{expected_root}/pyproject.toml",
+        f"{expected_root}/uv.lock",
+        f"{expected_root}/.python-version",
         f"{expected_root}/scripts/launch_server.py",
         f"{expected_root}/scripts/verify_environment.py",
         f"{expected_root}/tests/fixtures/configured/sgconfig.yml",

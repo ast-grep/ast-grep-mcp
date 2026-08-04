@@ -9,11 +9,7 @@ permissions:
     - '**'
     tags-ignore:
     - '**'
-    paths-ignore:
-    - '**/*.md'
   pull_request:
-    paths-ignore:
-    - '**/*.md'
   workflow_dispatch:
 
 defaults:
@@ -111,3 +107,15 @@ jobs:
     - name: Run integration tests
       run: |
         uv run --no-sync pytest tests/test_integration.py -v
+
+    - name: Build and check distributions
+      if: runner.os == 'Linux'
+      run: |
+        version="$(uv run --no-sync python -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+        uv run --no-sync python -m build --sdist --wheel --no-isolation
+        uv run --no-sync twine check --strict "dist/sg_mcp-${version}-py3-none-any.whl" "dist/sg_mcp-${version}.tar.gz"
+        uv run --no-sync check-wheel-contents "dist/sg_mcp-${version}-py3-none-any.whl"
+        uv run --no-sync python tests/package_smoke.py \
+          "dist/sg_mcp-${version}-py3-none-any.whl" \
+          "dist/sg_mcp-${version}.tar.gz" \
+          "$version"
