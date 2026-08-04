@@ -55,6 +55,32 @@ def _sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _directory_identity(directory: Path) -> tuple[int, int]:
+    """Identify a directory by device and inode so a swapped path is detectable.
+
+    The descriptor walker holds an O_NOFOLLOW handle, so the directory it reads
+    is the directory it validated. The fallback reopens by name and cannot rely
+    on that, leaving a window where the path may be replaced with a link to
+    another tree between validation and traversal.
+    """
+    try:
+        metadata = os.stat(directory, follow_symlinks=False)
+    except OSError as error:
+        raise ValueError(f"Could not inspect configuration resource directory: {directory}") from error
+    return metadata.st_dev, metadata.st_ino
+
+
+def _count_visited_entry(writer: _BundleWriter, display_path: Path) -> None:
+    """Charge every traversed entry against the resource budget.
+
+    Only copied files reach the writer, so a tree of filtered or empty entries
+    would otherwise permit unbounded walking beneath the advertised limit.
+    """
+    writer.visited += 1
+    if writer.visited > MAX_CONFIG_RESOURCE_FILES:
+        raise ValueError(f"Configuration exceeds the {MAX_CONFIG_RESOURCE_FILES}-file resource limit: {display_path}")
+
+
 def _is_link_like(metadata: os.stat_result) -> bool:
     if stat.S_ISLNK(metadata.st_mode):
         return True
@@ -306,6 +332,7 @@ class _BundleWriter:
     def __init__(self, root: Path) -> None:
         self.root = root
         self.files = 0
+        self.visited = 0
         self.bytes = 0
         self._digest = hashlib.sha256()
 
@@ -464,15 +491,18 @@ def _copy_directory(
         finally:
             os.close(descriptor)
         return
-    pending = [source]
+    pending = [(source, _directory_identity(source))]
     while pending:
-        directory = pending.pop()
+        directory, expected_identity = pending.pop()
         try:
             entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
         except OSError as error:
             raise ValueError(f"Could not read configuration resource directory: {directory}") from error
+        if _directory_identity(directory) != expected_identity:
+            raise ValueError(f"Configuration resource directory changed during traversal: {directory}")
         for entry in entries:
             entry_path = Path(entry.path)
+            _count_visited_entry(writer, entry_path)
             try:
                 metadata = entry.stat(follow_symlinks=False)
             except OSError as error:
@@ -480,7 +510,7 @@ def _copy_directory(
             if _is_link_like(metadata):
                 raise ValueError(f"Configuration resources cannot contain symlinks or reparse points: {entry_path}")
             if stat.S_ISDIR(metadata.st_mode):
-                pending.append(entry_path)
+                pending.append((entry_path, (metadata.st_dev, metadata.st_ino)))
                 continue
             if not stat.S_ISREG(metadata.st_mode):
                 raise ValueError(f"Configuration resources must be regular files: {entry_path}")
@@ -518,6 +548,7 @@ def _copy_directory_descriptor(
     file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     for entry in entries:
         display_path = source / relative / entry.name
+        _count_visited_entry(writer, display_path)
         try:
             metadata = entry.stat(follow_symlinks=False)
         except OSError as error:
@@ -645,9 +676,18 @@ def _relax_bundle_permissions(bundle_root: Path) -> None:
 
 
 def private_runtime_root(working_directory: Path, allowed_roots: Sequence[Path]) -> Path:
+    """Create the private bundle directory beneath the working directory.
+
+    The allowed roots state which project trees callers may inspect, which is a
+    separate question from where the server keeps its own runtime state. Requiring
+    the working directory to appear in that list breaks the documented invocation,
+    where the launcher runs from the server checkout while the inspected project
+    lives elsewhere, and pushes operators to expose the server's own source as an
+    inspection root. The bundle stays confined to one private directory here, and
+    the reparse, symlink, and permission checks below are what protect it.
+    """
+    del allowed_roots
     resolved_working_directory = working_directory.resolve(strict=True)
-    if not any(is_within(resolved_working_directory, root) for root in allowed_roots):
-        raise ValueError("Working directory resolves outside the allowed roots")
     runtime_root = resolved_working_directory / RUNTIME_DIRECTORY_NAME
     try:
         runtime_root.mkdir(mode=0o700, exist_ok=True)

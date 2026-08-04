@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import stat
 from pathlib import Path
 from types import SimpleNamespace
@@ -465,6 +466,58 @@ def test_snapshot_runtime_bundle_stays_inside_the_repository_boundary(tmp_path: 
     snapshot.close()
     assert not bundle.exists()
     assert not runtime_root.exists()
+
+
+def test_runtime_bundle_does_not_require_the_working_directory_to_be_inspectable(tmp_path: Path) -> None:
+    server = tmp_path / "server"
+    project = tmp_path / "project"
+    server.mkdir()
+    project.mkdir()
+
+    runtime_root = snapshot_module.private_runtime_root(server, (project.resolve(),))
+
+    assert runtime_root == server.resolve() / snapshot_module.RUNTIME_DIRECTORY_NAME
+    assert stat.S_IMODE(runtime_root.lstat().st_mode) == 0o700
+    runtime_root.rmdir()
+    runtime_root.symlink_to(project, target_is_directory=True)
+    with pytest.raises(ValueError, match="must be a real directory"):
+        snapshot_module.private_runtime_root(server, (project.resolve(),))
+
+
+def test_snapshot_bounds_traversed_entries_that_are_never_copied(tmp_path: Path) -> None:
+    rules = tmp_path / "rules"
+    rules.mkdir()
+    for index in range(snapshot_module.MAX_CONFIG_RESOURCE_FILES + 2):
+        (rules / f"ignored{index}.txt").write_text("x", encoding="utf-8", newline="")
+
+    with pytest.raises(ValueError, match="file resource limit"):
+        create_snapshot(tmp_path, "ruleDirs: [rules]\n")
+
+
+def test_snapshot_fallback_rejects_a_directory_swapped_after_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(snapshot_module.os, "supports_dir_fd", set())
+    rules = tmp_path / "rules"
+    nested = rules / "nested"
+    outside = tmp_path / "outside"
+    nested.mkdir(parents=True)
+    outside.mkdir()
+    (nested / "contained.yml").write_text("id: contained\n", encoding="utf-8", newline="")
+    (outside / "escaped.yml").write_text("id: escaped\n", encoding="utf-8", newline="")
+
+    real_scandir = snapshot_module.os.scandir
+
+    def swap_before_reopening(target: Any) -> Any:
+        if isinstance(target, (str, Path)) and Path(target) == nested and not nested.is_symlink():
+            shutil.rmtree(nested)
+            nested.symlink_to(outside, target_is_directory=True)
+        return real_scandir(target)
+
+    monkeypatch.setattr(snapshot_module.os, "scandir", swap_before_reopening)
+    with pytest.raises(ValueError, match="changed during traversal"):
+        create_snapshot(tmp_path, "ruleDirs: [rules]\n")
 
 
 def test_snapshot_cleanup_can_be_retried_after_a_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
