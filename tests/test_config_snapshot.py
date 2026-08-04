@@ -447,6 +447,40 @@ def test_snapshot_selects_the_gnu_library_on_a_glibc_host(tmp_path: Path, monkey
         snapshot.close()
 
 
+@pytest.mark.parametrize("libc", [("musl", "1"), ("libc", "6")])
+def test_snapshot_does_not_treat_a_named_libc_as_glibc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, libc: tuple[str, str]) -> None:
+    """A non-empty libc name is not evidence of glibc; Alpine reports ("musl", "1")."""
+    monkeypatch.setattr(snapshot_module.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(snapshot_module.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(snapshot_module.platform, "libc_ver", lambda: libc)
+    gnu = tmp_path / "gnu.so"
+    musl = tmp_path / "musl.so"
+    gnu.write_bytes(b"gnu parser")
+    musl.write_bytes(b"musl parser")
+    config = (
+        "ruleDirs: []\n"
+        "customLanguages:\n"
+        "  Demo:\n"
+        "    libraryPath:\n"
+        "      x86_64-unknown-linux-musl: musl.so\n"
+        "      x86_64-unknown-linux-gnu: gnu.so\n"
+        "    extensions: [demo]\n"
+    )
+    write_project_config(tmp_path, config)
+
+    snapshot = create_config_snapshot(
+        config_path="sgconfig.yml",
+        working_directory=tmp_path,
+        allowed_roots=(tmp_path.resolve(),),
+        trusted_native_libraries=((str(musl), hashlib.sha256(musl.read_bytes()).hexdigest()),),
+    )
+    try:
+        copied = next(snapshot.bundle_root.rglob("resources/native/*"))
+        assert copied.read_bytes() == musl.read_bytes()
+    finally:
+        snapshot.close()
+
+
 def test_snapshot_bounds_yaml_nodes_across_every_resource(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(snapshot_module, "MAX_SNAPSHOT_YAML_NODES", 200)
     rules = tmp_path / "rules"

@@ -672,9 +672,12 @@ def _target_triples() -> tuple[str, ...]:
 
     ast-grep documents libraryPath as a plain path, so the platform-keyed mapping
     is this server's own extension and these keys are its vocabulary. Linux has two
-    incompatible C libraries, and the operator states which builds exist by writing
-    the mapping; matching the key that is present is more reliable than detecting
-    the host, which Python exposes no supported way to do for musl.
+    incompatible C libraries, and platform.libc_ver names the one this interpreter
+    is linked against. Only "glibc" and "musl" identify a triple; it also answers
+    "libc" when it recognises the symbols but not the implementation, "emscripten",
+    and an empty string when the scan finds nothing. Every answer other than the
+    two named ones keeps both Linux keys and lets the configured mapping decide,
+    because a truthy name is not by itself evidence of glibc.
     """
     system = platform.system().lower()
     machine = platform.machine().lower()
@@ -693,8 +696,10 @@ def _target_triples() -> tuple[str, ...]:
         return (f"{architecture}-apple-darwin",)
     if system == "linux":
         library, _ = platform.libc_ver()
-        if library:
+        if library == "glibc":
             return (f"{architecture}-unknown-linux-gnu",)
+        if library == "musl":
+            return (f"{architecture}-unknown-linux-musl",)
         return (f"{architecture}-unknown-linux-musl", f"{architecture}-unknown-linux-gnu")
     if system == "windows":
         return (f"{architecture}-pc-windows-msvc",)
