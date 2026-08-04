@@ -19,3 +19,30 @@
 - Type-check the other platforms, because platform-specific stubs change which branches resolve: `uv run --no-sync mypy --platform win32 main.py config_snapshot.py scripts tests` and `uv run --no-sync pyright --pythonplatform Windows`.
 - Treat byte offsets, digests, and file contents as line-ending dependent. Fixtures write through `newline=""`, and assertions derive offsets from the bytes on disk rather than hardcoding values that only hold under LF.
 - Confirm a clean environment can still build the project. `uv run --no-sync` never exercises the build, so a missing build dependency stays invisible locally while every CI job fails at its first step.
+
+# Filesystem behaviour that differs by platform
+
+A type check cannot reach these; only executing the test on the other platform can. When a change touches path traversal, permissions, or process teardown, run its test on Linux before pushing, and read the assertion below before writing a new one.
+
+- Inode numbers do not identify a path across a change. Removing a directory frees its inode immediately, and Linux gives the same number to whatever is created in its place, so a replacement compares equal to what it replaced. Windows does not report a stable inode across calls at all. Compare the file type, which a link cannot match.
+- `chmod` sets only the read-only flag on Windows; every other bit is ignored. Guard mode assertions with `os.name == "posix"`.
+- `os.scandir` receives a `Path` for source trees and a `str` or descriptor elsewhere, and directory entries arrive in filesystem order. A test that patches it must accept every form and must not assume which entry is reached first.
+- Resolving a path that was just replaced with a symlink follows the link to its target, so a comparison against the pre-swap path stops matching. Match on the entry name instead.
+
+# Running the suite on Linux
+
+CI is the slowest way to learn that a test is platform-dependent. Reproduce it locally instead, in a container, which is a separate machine rather than an alternate environment for this checkout and so does not cross the execution boundary above.
+
+```bash
+docker run --rm -v "$PWD":/w -w /w python:3.14-slim bash -c '
+pip install -q "mcp[cli]==2.0.0" "pydantic>=2.11.0,<3" "pyyaml>=6.0.2,<7" \
+  pytest pytest-asyncio pytest-mock bashlex==0.18 "markdown-it-py>=3,<4"
+python -m pytest tests/test_config_snapshot.py tests/test_environment_policy.py \
+  -p no:cacheprovider -o addopts="" -q'
+```
+
+`-o addopts=""` drops the coverage flags the container does not install, and `-p no:cacheprovider` keeps the container from writing a cache into the working tree. A security check needs the stronger form: confirm the test fails once the check is removed, on that same platform. A test that passes either way proves nothing.
+
+# Removing the pytest runtime tree
+
+`tests/conftest.py` clears `test-runtime/` after a run. Snapshot bundles are deliberately read-only, so a manual `rm -rf test-runtime` fails partway and leaves a tree that breaks the next run with unrelated collection errors. Use `chmod -R u+rwX test-runtime && rm -rf test-runtime`.

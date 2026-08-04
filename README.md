@@ -201,6 +201,8 @@ uv run --no-sync python tests/package_smoke.py dist/sg_mcp-0.4.0-py3-none-any.wh
 
 Unit coverage is enforced at 84%. Integration acceptance requires an explicit executable reporting exactly ast-grep 0.45.0 and negotiates both modern `mode="auto"` and handshake-era `mode="legacy"` MCP connections.
 
+Those commands describe one platform. Acceptance runs on Linux, macOS, and Windows, and path traversal, permissions, and process teardown behave differently on each: inode numbers are reused on Linux and unstable on Windows, and `chmod` sets only the read-only flag on Windows. Type-check the other platforms with `mypy --platform` and `pyright --pythonplatform`, and run the affected tests on Linux in a container before pushing. `AGENTS.md` carries the container command and the assertions that do not hold everywhere.
+
 Distribution verification stays in the repository-owned locked environment: tool execution disables synchronization, builds disable PEP 517 isolation, the wheel is imported directly from its archive, and the sdist is inspected without extraction or installation.
 
 `AGENTS.md` defines the repository execution boundary. `scripts/verify_environment.py` fails unless verification runs from the repository root in its `.venv`, and it rejects alternate, isolated, cached, and external environment commands in verification surfaces. `scripts/launch_server.py` checks the lock and synchronized environment without updating either before starting stdio. CI fixes `UV_PROJECT_ENVIRONMENT` to `.venv`, synchronizes once with `--locked`, and runs every subsequent tool with `--no-sync`.
