@@ -444,10 +444,25 @@ def _reject_zero_progress_cycles(definitions: Mapping[str, object], *, label: st
                 pending.append((dependency, iter(dependencies.get(dependency, set()))))
 
 
+def _as_cycle_definition(value: object) -> dict[str, Any]:
+    """Present a utility entry in the shape the cycle detector reads.
+
+    A local utility value is the rule object itself, so it is wrapped under
+    ``rule``. A parameterized entry already carries ``arguments`` alongside its
+    own ``rule``; wrapping that again would bury both the parameters and the
+    calls inside, letting mutually recursive definitions pass unnoticed.
+    """
+    if isinstance(value, dict) and "arguments" in value and "rule" in value:
+        return cast(dict[str, Any], value)
+    return {"rule": value}
+
+
 def _validate_local_utility_cycles(rule: Mapping[str, Any], *, label: str) -> None:
     utils = rule.get("utils")
     if isinstance(utils, dict):
-        definitions = {name: {"rule": value} for name, value in cast(dict[object, object], utils).items() if isinstance(name, str)}
+        definitions = {
+            name: _as_cycle_definition(value) for name, value in cast(dict[object, object], utils).items() if isinstance(name, str)
+        }
         _reject_zero_progress_cycles(definitions, label=label)
 
 
@@ -601,7 +616,15 @@ def _copy_directory_descriptor(
             )
 
 
-def _target_triple() -> str:
+def _target_triples() -> tuple[str, ...]:
+    """List the platform keys a configured libraryPath mapping may use, most specific first.
+
+    ast-grep documents libraryPath as a plain path, so the platform-keyed mapping
+    is this server's own extension and these keys are its vocabulary. Linux has two
+    incompatible C libraries, and the operator states which builds exist by writing
+    the mapping; matching the key that is present is more reliable than detecting
+    the host, which Python exposes no supported way to do for musl.
+    """
     system = platform.system().lower()
     machine = platform.machine().lower()
     architecture = {
@@ -616,11 +639,11 @@ def _target_triple() -> str:
     if architecture is None:
         raise ValueError(f"Unsupported native-parser architecture: {machine}")
     if system == "darwin":
-        return f"{architecture}-apple-darwin"
+        return (f"{architecture}-apple-darwin",)
     if system == "linux":
-        return f"{architecture}-unknown-linux-gnu"
+        return (f"{architecture}-unknown-linux-musl", f"{architecture}-unknown-linux-gnu")
     if system == "windows":
-        return f"{architecture}-pc-windows-msvc"
+        return (f"{architecture}-pc-windows-msvc",)
     raise ValueError(f"Unsupported native-parser platform: {system}")
 
 
@@ -920,9 +943,10 @@ def create_config_snapshot(
         native_hashes: dict[str, str] = {}
         used_trusted: set[Path] = set()
         copied_custom_languages: dict[str, Any] = {}
+        library_components: dict[str, str] = {}
         if "customLanguages" in config:
             custom_languages = _mapping(config["customLanguages"], label="sgconfig.yml customLanguages")
-            target = _target_triple()
+            targets = _target_triples()
             for name, value in custom_languages.items():
                 if not name or "\0" in name:
                     raise ValueError("sgconfig.yml customLanguages contains an invalid language name")
@@ -941,9 +965,9 @@ def create_config_snapshot(
                         cast(object, raw_library),
                         label=f"sgconfig.yml customLanguages.{name}.libraryPath",
                     )
-                    selected = platforms.get(target)
+                    selected = next((platforms[triple] for triple in targets if isinstance(platforms.get(triple), str)), None)
                     if not isinstance(selected, str):
-                        raise ValueError(f"Custom language {name!r} has no native library for {target}")
+                        raise ValueError(f"Custom language {name!r} has no native library for {' or '.join(targets)}")
                     selected_library = selected
                 else:
                     raise ValueError(f"Custom language {name!r} must configure libraryPath")
@@ -972,7 +996,13 @@ def create_config_snapshot(
                     )
                 used_trusted.add(library_path)
                 suffix = "".join(library_path.suffixes)
-                library_destination = Path(f"resources/native/{_safe_component(name)}{suffix}")
+                component = f"{_safe_component(name)}{suffix}"
+                collision = library_components.setdefault(component, name)
+                if collision != name:
+                    raise ValueError(
+                        f"Custom languages {collision!r} and {name!r} both resolve to the private resource {component!r}; rename one"
+                    )
+                library_destination = Path(f"resources/native/{component}")
                 writer.add(library_destination, library_payload)
                 native_hashes[name] = actual_digest
 

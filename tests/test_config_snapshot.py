@@ -365,6 +365,55 @@ def test_snapshot_rejects_invalid_config_bytes_and_path_kinds(tmp_path: Path) ->
         )
 
 
+def test_snapshot_rejects_custom_languages_that_share_a_private_resource_name(tmp_path: Path) -> None:
+    first = tmp_path / "first.dylib"
+    second = tmp_path / "second.dylib"
+    first.write_bytes(b"first parser")
+    second.write_bytes(b"second parser")
+    config = (
+        "ruleDirs: []\n"
+        "customLanguages:\n"
+        "  Foo+Bar:\n"
+        "    libraryPath: first.dylib\n"
+        "    extensions: [foo]\n"
+        "  Foo-Bar:\n"
+        "    libraryPath: second.dylib\n"
+        "    extensions: [bar]\n"
+    )
+    write_project_config(tmp_path, config)
+    trusted = tuple((str(path), hashlib.sha256(path.read_bytes()).hexdigest()) for path in (first, second))
+
+    with pytest.raises(ValueError, match="both resolve to the private resource"):
+        create_config_snapshot(
+            config_path="sgconfig.yml",
+            working_directory=tmp_path,
+            allowed_roots=(tmp_path.resolve(),),
+            trusted_native_libraries=trusted,
+        )
+
+
+def test_snapshot_accepts_a_musl_keyed_native_library_on_linux(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(snapshot_module.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(snapshot_module.platform, "machine", lambda: "x86_64")
+    parser = tmp_path / "parser.so"
+    parser.write_bytes(b"musl parser bytes")
+    config = (
+        "ruleDirs: []\ncustomLanguages:\n  Demo:\n    libraryPath:\n      x86_64-unknown-linux-musl: parser.so\n    extensions: [demo]\n"
+    )
+    write_project_config(tmp_path, config)
+
+    snapshot = create_config_snapshot(
+        config_path="sgconfig.yml",
+        working_directory=tmp_path,
+        allowed_roots=(tmp_path.resolve(),),
+        trusted_native_libraries=((str(parser), hashlib.sha256(parser.read_bytes()).hexdigest()),),
+    )
+    try:
+        assert snapshot.capabilities["custom_languages"]
+    finally:
+        snapshot.close()
+
+
 def test_snapshot_native_library_requires_exact_hash_and_is_copied(tmp_path: Path) -> None:
     parser = tmp_path / "parser.dylib"
     parser.write_bytes(b"trusted parser bytes")
@@ -556,6 +605,27 @@ def test_snapshot_rejects_zero_progress_cycles_but_preserves_relational_recursio
     )
     snapshot = create_snapshot(tmp_path, "ruleDirs: []\nutilDirs: [utils]\n")
     snapshot.close()
+
+
+def test_local_parameterized_utilities_are_checked_for_cycles(tmp_path: Path) -> None:
+    utils = tmp_path / "utils"
+    utils.mkdir()
+    (utils / "parameterized.yml").write_text(
+        "id: entry\n"
+        "language: Python\n"
+        "rule: {matches: first}\n"
+        "utils:\n"
+        "  first:\n"
+        "    arguments: [$A]\n"
+        "    rule: {matches: second}\n"
+        "  second:\n"
+        "    arguments: [$A]\n"
+        "    rule: {matches: first}\n",
+        encoding="utf-8",
+        newline="",
+    )
+    with pytest.raises(ValueError, match="zero-progress utility-rule cycle"):
+        create_snapshot(tmp_path, "ruleDirs: []\nutilDirs: [utils]\n")
 
 
 def test_inline_rule_cycle_validation_rejects_composites_and_allows_relations() -> None:
