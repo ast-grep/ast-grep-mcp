@@ -556,15 +556,19 @@ def test_snapshot_fallback_rejects_a_directory_swapped_after_validation(
     (nested / "contained.yml").write_text("id: contained\n", encoding="utf-8", newline="")
     (outside / "escaped.yml").write_text("id: escaped\n", encoding="utf-8", newline="")
 
-    real_scandir = snapshot_module.os.scandir
+    real_identity = snapshot_module._directory_identity
+    swapped = False
 
-    def swap_before_reopening(target: Any) -> Any:
-        if isinstance(target, (str, Path)) and os.path.basename(str(target)) == nested.name and not nested.is_symlink():
+    def swap_once(directory: Path) -> tuple[int, int]:
+        nonlocal swapped
+        identity = real_identity(directory)
+        if not swapped and directory.name == nested.name:
+            swapped = True
             shutil.rmtree(nested)
             nested.symlink_to(outside, target_is_directory=True)
-        return real_scandir(target)
+        return identity
 
-    monkeypatch.setattr(snapshot_module.os, "scandir", swap_before_reopening)
+    monkeypatch.setattr(snapshot_module, "_directory_identity", swap_once)
     with pytest.raises(ValueError, match="changed during traversal"):
         create_snapshot(tmp_path, "ruleDirs: [rules]\n")
 
