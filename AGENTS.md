@@ -22,16 +22,17 @@
 
 # Writing code here
 
-- Explain intent in a docstring or in clearer code. Source and tests carry no comments, and `test_repository_python_carries_no_comment_tokens` fails on any that appear.
-- Derive a value from the thing that owns it rather than restating it. A parameter name comes from the callee's signature, a delegation target from the caller's own source, a platform key from the mapping the operator wrote. A hand-maintained list of names, spellings, or positions drifts from its source and misses the cases nobody thought to enumerate.
-- Read every position a value can occupy before binding one. Argv is the first argument to `subprocess.run`, the second to `os.execv`, and the third to `os.spawnv`; a checker that assumes the first inspects the wrong expression and reports success.
+Read the `python` skill and the workflow it routes to before editing.
+
+- Source and tests carry no comments; `test_repository_python_carries_no_comment_tokens` fails on any that appear. Explain intent in a docstring.
+- Argv is the first argument to `subprocess.run`, the second to `os.execv`, and the third to `os.spawnv`. Read the signature before binding a position.
 
 # Fixing a reported defect
 
-- Reproduce the defect before changing anything, and confirm the reproduction fails once the fix is removed. A check that passes with and without its fix proves nothing.
-- Fix the class, not the instance. A guard keyed on a name plus a suffix still collides when the suffixes differ; a rejection of symlinks still admits a junction. Ask which other inputs reach the same line before declaring it closed.
-- Re-read the adjacent guards afterwards. Both times a fix here proved incomplete, the module already contained the predicate that would have closed it, and the fix simply did not call it.
-- State a dismissal with the evidence that supports it, in a reply on the thread. An unanswered finding returns on the next revision.
+- Reproduce the defect first, and confirm the reproduction fails once the fix is removed.
+- Fix the class, not the instance. A guard keyed on name plus suffix still collides when suffixes differ; a symlink rejection still admits a junction.
+- Check the adjacent guards. Both incomplete fixes here left an existing predicate uncalled.
+- Reply on the thread with the evidence when dismissing a finding, or it returns next revision.
 
 # Filesystem behaviour that differs by platform
 
