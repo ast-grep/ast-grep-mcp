@@ -339,6 +339,19 @@ class _BundleWriter:
         self.bytes = 0
         self._digest = hashlib.sha256()
 
+    def reserve(self, relative: Path) -> Path:
+        """Create a copied directory even when the source retains no entries.
+
+        A configured test directory that is valid but empty would otherwise leave
+        the private configuration pointing at a path that was never created, and
+        ast-grep would be handed a missing directory instead of an empty one.
+        """
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"Invalid private bundle path: {relative}")
+        destination = self.root / relative
+        destination.mkdir(parents=True, exist_ok=True, mode=0o700)
+        return destination
+
     def add(self, relative: Path, payload: bytes, *, resource: bool = True) -> Path:
         if relative.is_absolute() or ".." in relative.parts:
             raise ValueError(f"Invalid private bundle path: {relative}")
@@ -490,6 +503,7 @@ def _copy_directory(
     yaml_documents: list[tuple[str, list[dict[str, Any]]]],
     boundary: Path,
 ) -> None:
+    writer.reserve(destination)
     if os.open in os.supports_dir_fd:
         try:
             descriptor = _open_directory_chain(source, boundary=boundary, label="configuration resource directory")

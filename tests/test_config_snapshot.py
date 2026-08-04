@@ -447,6 +447,18 @@ def test_snapshot_selects_the_gnu_library_on_a_glibc_host(tmp_path: Path, monkey
         snapshot.close()
 
 
+def test_snapshot_creates_an_empty_configured_test_directory(tmp_path: Path) -> None:
+    (tmp_path / "rule-tests").mkdir()
+
+    snapshot = create_snapshot(tmp_path, "ruleDirs: []\ntestConfigs:\n  - testDir: rule-tests\n")
+    try:
+        private_config = yaml.safe_load(snapshot.test_config_path.read_text(encoding="utf-8"))
+        copied = snapshot.bundle_root / private_config["testConfigs"][0]["testDir"]
+        assert copied.is_dir()
+    finally:
+        snapshot.close()
+
+
 def test_snapshot_native_library_requires_exact_hash_and_is_copied(tmp_path: Path) -> None:
     parser = tmp_path / "parser.dylib"
     parser.write_bytes(b"trusted parser bytes")

@@ -892,12 +892,12 @@ def _contains_mapping_key(value: object, forbidden_key: str) -> bool:
     return False
 
 
-def validate_rule_yaml(rule_yaml: str, *, forbid_regex_rules: bool) -> None:
+def validate_rule_yaml(rule_yaml: str, *, forbid_regex_rules: bool, caller_supplied: bool = True) -> None:
     try:
         encoded = rule_yaml.encode("utf-8")
     except UnicodeEncodeError as error:
         raise ValueError("ast-grep rule YAML must be valid UTF-8") from error
-    if len(encoded) > MAX_INLINE_RULE_BYTES:
+    if caller_supplied and len(encoded) > MAX_INLINE_RULE_BYTES:
         raise ValueError(f"ast-grep rule YAML exceeds the {MAX_INLINE_RULE_BYTES // 1024} KiB inline limit")
     documents = load_strict_yaml_documents(rule_yaml, label="ast-grep rule YAML")
     if not documents or all(document is None for document in documents):
@@ -1972,8 +1972,9 @@ class AstGrepService:
         exclude_globs: Sequence[str] | None,
         max_results: int | None,
         include_metadata: bool = False,
+        caller_supplied: bool = True,
     ) -> SearchResults:
-        validate_rule_yaml(rule_yaml, forbid_regex_rules=self.runtime.forbid_regex_rules)
+        validate_rule_yaml(rule_yaml, forbid_regex_rules=self.runtime.forbid_regex_rules, caller_supplied=caller_supplied)
         project = self._resolve_project(project_folder)
         search_paths = self._resolve_paths(project, paths)
         limit = self._result_limit(max_results)
@@ -2209,6 +2210,7 @@ class AstGrepService:
             include_globs=include_globs,
             exclude_globs=exclude_globs,
             max_results=max_results,
+            caller_supplied=False,
         )
 
     def find_code_by_rule(

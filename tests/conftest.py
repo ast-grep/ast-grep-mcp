@@ -30,7 +30,9 @@ def pytest_unconfigure(config: Config) -> None:
         raise RuntimeError(f"Refusing to remove unexpected pytest runtime path: {target}")
     for directory, directories, files in os.walk(target, topdown=False):
         for name in files:
-            _chmod_best_effort(Path(directory) / name, 0o600)
+            path = Path(directory) / name
+            if not path.is_symlink():
+                _chmod_best_effort(path, 0o600)
         for name in directories:
             path = Path(directory) / name
             if not path.is_symlink():
