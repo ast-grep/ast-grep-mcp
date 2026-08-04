@@ -509,6 +509,8 @@ def _copy_directory(
     pending = [(source, _directory_identity(source))]
     while pending:
         directory, expected_identity = pending.pop()
+        if _directory_identity(directory) != expected_identity:
+            raise ValueError(f"Configuration resource directory changed during traversal: {directory}")
         try:
             entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
         except OSError as error:

@@ -557,9 +557,10 @@ def test_snapshot_fallback_rejects_a_directory_swapped_after_validation(
     (outside / "escaped.yml").write_text("id: escaped\n", encoding="utf-8", newline="")
 
     real_scandir = snapshot_module.os.scandir
+    resolved_nested = nested.resolve()
 
     def swap_before_reopening(target: Any) -> Any:
-        if isinstance(target, (str, Path)) and Path(target) == nested and not nested.is_symlink():
+        if isinstance(target, (str, Path)) and Path(target).resolve() == resolved_nested and not nested.is_symlink():
             shutil.rmtree(nested)
             nested.symlink_to(outside, target_is_directory=True)
         return real_scandir(target)
