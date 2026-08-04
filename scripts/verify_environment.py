@@ -15,6 +15,7 @@ ROOT: Final = Path(__file__).resolve().parents[1]
 EXPECTED_ENVIRONMENT: Final = (ROOT / ".venv").resolve()
 EXPECTED_PYTHON: Final = (3, 14, 6)
 SHELL_FENCE_LANGUAGES: Final = frozenset({"bash", "sh", "shell", "zsh"})
+ROOT_WORKING_DIRECTORIES: Final = frozenset({"", ".", "./", "${{ github.workspace }}"})
 PATH_ENVIRONMENT_VARIABLES: Final = frozenset({"TMPDIR", "TEMP", "TMP", "UV_CACHE_DIR"})
 PROCESS_CALLS: Final = frozenset(
     {
@@ -467,9 +468,14 @@ def _markdown_policy_failures(path: Path) -> list[str]:
     failures: list[str] = []
     for token in MarkdownIt("commonmark").parse(source):
         info = token.info.strip().split(maxsplit=1)
-        if token.type != "fence" or not info or info[0].lower() not in SHELL_FENCE_LANGUAGES:
+        if token.type == "fence":
+            if not info or info[0].lower() not in SHELL_FENCE_LANGUAGES:
+                continue
+            start = token.map[0] + 2 if token.map is not None else 1
+        elif token.type == "code_block":
+            start = token.map[0] + 1 if token.map is not None else 1
+        else:
             continue
-        start = token.map[0] + 2 if token.map is not None else 1
         failures.extend(shell_policy_failures(token.content, label=str(path.relative_to(ROOT)), line_offset=start))
     return failures
 
@@ -491,17 +497,21 @@ def _mapping_environment_failures(value: object, *, label: str) -> list[str]:
     return failures
 
 
-def _yaml_run_nodes(node: Any) -> Iterator[Any]:
+def _yaml_scalar_nodes(node: Any, *, key_name: str) -> Iterator[Any]:
     import yaml
 
     if isinstance(node, yaml.MappingNode):
         for key, value in node.value:
-            if isinstance(key, yaml.ScalarNode) and key.value == "run" and isinstance(value, yaml.ScalarNode):
+            if isinstance(key, yaml.ScalarNode) and key.value == key_name and isinstance(value, yaml.ScalarNode):
                 yield value
-            yield from _yaml_run_nodes(value)
+            yield from _yaml_scalar_nodes(value, key_name=key_name)
     elif isinstance(node, yaml.SequenceNode):
         for item in node.value:
-            yield from _yaml_run_nodes(item)
+            yield from _yaml_scalar_nodes(item, key_name=key_name)
+
+
+def _yaml_run_nodes(node: Any) -> Iterator[Any]:
+    yield from _yaml_scalar_nodes(node, key_name="run")
 
 
 def _workflow_policy_failures(path: Path) -> list[str]:
@@ -521,6 +531,9 @@ def _workflow_policy_failures(path: Path) -> list[str]:
     if composed is not None:
         for node in _yaml_run_nodes(composed):
             failures.extend(shell_policy_failures(cast(str, node.value), label=label, line_offset=node.start_mark.line + 1))
+        for node in _yaml_scalar_nodes(composed, key_name="working-directory"):
+            if cast(str, node.value).strip() not in ROOT_WORKING_DIRECTORIES:
+                failures.append(f"{label}:{node.start_mark.line + 1}: workflow command runs outside the repository root")
     return list(dict.fromkeys(failures))
 
 

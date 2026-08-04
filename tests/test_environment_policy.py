@@ -149,6 +149,44 @@ def test_environment_policy_scans_every_root_markdown_document(tmp_path: Path, m
     assert any(failure.startswith("CONTRIBUTING.md:") for failure in failures)
 
 
+def test_environment_policy_scans_indented_markdown_command_blocks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """CommonMark emits code_block rather than fence for an indented example, which carries no language."""
+    (tmp_path / "README.md").write_text("Run it:\n\n    uvx ast-grep-server\n", encoding="utf-8")
+    monkeypatch.setattr(verify_environment, "ROOT", tmp_path)
+
+    failures = verify_environment.static_policy_failures()
+
+    assert any(failure.endswith("cache-isolated tool execution") for failure in failures)
+
+
+@pytest.mark.parametrize(
+    ("directory", "outside"),
+    [("tests", True), ("../elsewhere", True), (".", False), ("${{ github.workspace }}", False)],
+)
+def test_environment_policy_rejects_a_non_root_workflow_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, directory: str, outside: bool
+) -> None:
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "test.yml").write_text(
+        "name: test\n"
+        "'on':\n"
+        "  push:\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        f"      - working-directory: {directory}\n"
+        "        run: uv run --no-sync pytest\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(verify_environment, "ROOT", tmp_path)
+
+    failures = verify_environment.static_policy_failures()
+
+    assert any(failure.endswith("runs outside the repository root") for failure in failures) is outside
+
+
 def test_repository_python_carries_no_comment_tokens() -> None:
     root = verify_environment.ROOT
     sources = [root / "main.py", root / "config_snapshot.py"]
