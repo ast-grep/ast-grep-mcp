@@ -593,8 +593,9 @@ def run_text_process(
     except OSError as error:
         raise RuntimeError(f"Command could not be executed: {error}") from error
 
+    process_group = _process_group_id(process)
     if process.stdout is None or process.stderr is None:
-        _terminate_and_reap(process)
+        _terminate_and_reap(process, process_group)
         raise RuntimeError("Command pipes were not created")
 
     stop_io = threading.Event()
@@ -620,7 +621,7 @@ def run_text_process(
     ]
     if input_bytes is not None:
         if process.stdin is None:
-            _terminate_and_reap(process)
+            _terminate_and_reap(process, process_group)
             raise RuntimeError("Command stdin pipe was not created")
         threads.append(
             threading.Thread(
@@ -643,23 +644,22 @@ def run_text_process(
             elif stderr_overflow[0] and not truncate_stderr:
                 overflow_error = f"Command diagnostic output exceeds the {stderr_limit}-byte limit"
             if overflow_error is not None:
-                _terminate_and_reap(process)
+                _terminate_and_reap(process, process_group)
                 break
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             timeout_error = subprocess.TimeoutExpired(list(command), timeout_seconds)
-            _terminate_and_reap(process)
+            _terminate_and_reap(process, process_group)
             break
         try:
             process.wait(timeout=min(remaining, 0.05))
         except subprocess.TimeoutExpired:
             continue
-    if process.poll() is None:
-        _terminate_and_reap(process)
+    _terminate_and_reap(process, process_group)
     for thread in threads:
         thread.join(timeout=0.05)
     if any(thread.is_alive() for thread in threads):
-        _terminate_and_reap(process)
+        _terminate_and_reap(process, process_group)
     stop_io.set()
     for pipe in (process.stdout, process.stderr):
         try:
@@ -1241,11 +1241,29 @@ def _signal_process_group(process_id: int, process_signal: int) -> None:
     kill_group(process_id, process_signal)
 
 
-def _terminate_and_reap(process: subprocess.Popen[Any]) -> None:
+def _process_group_id(process: subprocess.Popen[Any]) -> int | None:
+    """Read the child's group before it is reaped, while its pid still identifies the group.
+
+    POSIX keeps a process group alive while any member remains, so the captured
+    identifier stays addressable after the leader exits. The leader's pid does not:
+    once reaped it is free for reuse, and signalling it could reach another process.
+    """
+    if sys.platform == "win32":
+        return None
+    try:
+        return os.getpgid(process.pid)
+    except OSError:
+        return None
+
+
+def _terminate_and_reap(process: subprocess.Popen[Any], group_id: int | None = None) -> None:
     signaled_group = False
     if os.name == "posix":
+        group_id = group_id if group_id is not None else _process_group_id(process)
         try:
-            _signal_process_group(process.pid, signal.SIGTERM)
+            if group_id is None:
+                raise ProcessLookupError
+            _signal_process_group(group_id, signal.SIGTERM)
             signaled_group = True
         except OSError:
             pass
@@ -1265,9 +1283,9 @@ def _terminate_and_reap(process: subprocess.Popen[Any]) -> None:
     while time.monotonic() < deadline:
         leader_running = process.poll() is None
         group_running = False
-        if os.name == "posix" and signaled_group:
+        if os.name == "posix" and signaled_group and group_id is not None:
             try:
-                _signal_process_group(process.pid, 0)
+                _signal_process_group(group_id, 0)
                 group_running = True
             except OSError:
                 pass
@@ -1276,9 +1294,9 @@ def _terminate_and_reap(process: subprocess.Popen[Any]) -> None:
             return
         time.sleep(0.01)
 
-    if sys.platform != "win32" and signaled_group:
+    if sys.platform != "win32" and signaled_group and group_id is not None:
         try:
-            _signal_process_group(process.pid, signal.SIGKILL)
+            _signal_process_group(group_id, signal.SIGKILL)
         except OSError:
             pass
     if process.poll() is None:
@@ -1438,8 +1456,9 @@ def run_ndjson_process(
     except OSError as error:
         raise RuntimeError(f"Command could not be executed: {error}") from error
 
+    process_group = _process_group_id(process)
     if process.stdout is None or process.stderr is None:
-        _terminate_and_reap(process)
+        _terminate_and_reap(process, process_group)
         raise RuntimeError("Command pipes were not created")
 
     stop_io = threading.Event()
@@ -1470,7 +1489,7 @@ def run_ndjson_process(
     ]
     if input_bytes is not None:
         if process.stdin is None:
-            _terminate_and_reap(process)
+            _terminate_and_reap(process, process_group)
             raise RuntimeError("Command stdin pipe was not created")
         threads.append(
             threading.Thread(
@@ -1550,7 +1569,7 @@ def run_ndjson_process(
         if observed_extra:
             if process.poll() is None:
                 terminated_for_limit = True
-                _terminate_and_reap(process)
+                _terminate_and_reap(process, process_group)
             else:
                 process.wait()
         else:
@@ -1564,8 +1583,7 @@ def run_ndjson_process(
             except subprocess.TimeoutExpired as error:
                 raise RuntimeError(f"Command timed out after {timeout_seconds:g} seconds") from error
     finally:
-        if process.poll() is None:
-            _terminate_and_reap(process)
+        _terminate_and_reap(process, process_group)
         for thread in threads:
             thread.join(timeout=PROCESS_TERMINATION_GRACE_SECONDS)
         stop_io.set()

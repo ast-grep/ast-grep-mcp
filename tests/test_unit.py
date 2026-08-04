@@ -1948,6 +1948,40 @@ while not pathlib.Path(sys.argv[1]).exists() and time.monotonic() < deadline:
     assert_descendant_listener_stopped(descendant_port_path)
 
 
+def test_ndjson_runner_reaps_descendants_after_the_leader_exits(tmp_path: Path) -> None:
+    descendant_port_path = tmp_path / "ndjson-descendant.port"
+    leader_program = """
+import json
+import pathlib
+import subprocess
+import sys
+import time
+
+subprocess.Popen([sys.executable, "-c", sys.argv[2], sys.argv[1]])
+deadline = time.monotonic() + 5
+while not pathlib.Path(sys.argv[1]).exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+sys.stdout.write(sys.argv[3] + "\\n")
+sys.stdout.flush()
+"""
+    with pytest.raises(RuntimeError, match="timed out"):
+        run_ndjson_process(
+            [
+                sys.executable,
+                "-c",
+                leader_program,
+                str(descendant_port_path),
+                descendant_listener_program(),
+                json.dumps(canonical_match()),
+            ],
+            timeout_seconds=2,
+            working_directory=tmp_path,
+            record_parser=_parse_match_record,
+            item_limit=10,
+        )
+    assert_descendant_listener_stopped(descendant_port_path)
+
+
 @pytest.mark.parametrize(("stream", "message"), [("stdout", "stdout"), ("stderr", "stderr")])
 def test_text_runner_rejects_invalid_utf8_output(tmp_path: Path, stream: str, message: str) -> None:
     destination = "stdout" if stream == "stdout" else "stderr"
