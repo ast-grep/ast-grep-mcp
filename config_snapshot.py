@@ -644,6 +644,9 @@ def _target_triples() -> tuple[str, ...]:
     if system == "darwin":
         return (f"{architecture}-apple-darwin",)
     if system == "linux":
+        library, _ = platform.libc_ver()
+        if library:
+            return (f"{architecture}-unknown-linux-gnu",)
         return (f"{architecture}-unknown-linux-musl", f"{architecture}-unknown-linux-gnu")
     if system == "windows":
         return (f"{architecture}-pc-windows-msvc",)

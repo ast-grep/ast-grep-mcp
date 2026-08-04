@@ -51,6 +51,8 @@ SHELL_PROCESS_CALLS: Final = frozenset(
     }
 )
 TEMPORARY_APIS: Final = frozenset({"tempfile.mkdtemp", "tempfile.TemporaryDirectory"})
+ARGV_PARAMETERS: Final = frozenset({"argv", "args", "command", "cmd", "program"})
+REQUIRED_SYNC_FLAGS: Final = frozenset({"--locked", "--all-extras", "--no-python-downloads"})
 
 
 def resolve_from_root(value: str) -> Path:
@@ -156,28 +158,73 @@ def _is_python_executable(value: str) -> bool:
 
 
 def _command_argv(words: Sequence[str]) -> list[str]:
+    """Strip the wrappers that stand between a shell word list and the real executable.
+
+    Leading assignments, ``env`` with its own options, and the ``command`` and
+    ``exec`` builtins all delay the executable. ``env -u NAME`` and ``env -C DIR``
+    take an operand, so skipping only the flag would mistake that operand for the
+    command being run.
+    """
     argv = list(words)
-    index = 0
-    while index < len(argv) and _split_assignment(argv[index]) is not None:
-        index += 1
-    argv = argv[index:]
-    if not argv or _executable_basename(argv[0]) != "env":
+    while argv:
+        index = 0
+        while index < len(argv) and _split_assignment(argv[index]) is not None:
+            index += 1
+        argv = argv[index:]
+        if not argv:
+            return argv
+        executable = _executable_basename(argv[0])
+        if executable == "env":
+            argv = _env_operand(argv)
+            continue
+        if executable in {"command", "exec"}:
+            index = 1
+            while index < len(argv) and argv[index].startswith("-"):
+                index += 1
+            argv = argv[index:]
+            continue
         return argv
+    return argv
+
+
+def _env_operand(argv: Sequence[str]) -> list[str]:
+    operand_options = {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}
     index = 1
     while index < len(argv):
         word = argv[index]
-        if _split_assignment(word) is not None or word.startswith("-"):
+        if _split_assignment(word) is not None:
+            index += 1
+            continue
+        if word in operand_options:
+            index += 2
+            continue
+        if word.startswith("-"):
             index += 1
             continue
         break
-    return argv[index:]
+    return list(argv[index:])
 
 
 def _uv_subcommand(argv: Sequence[str]) -> tuple[str, int] | None:
+    """Identify the uv subcommand, skipping the operands that global options consume.
+
+    ``uv --directory run sync`` names a directory called ``run``, so scanning for the
+    first word that looks like a subcommand would read the operand instead.
+    """
     subcommands = {"python", "run", "sync", "tool", "venv"}
-    for index, word in enumerate(argv[1:], start=1):
+    global_operand_options = {"--directory", "--project", "--config-file", "--cache-dir", "--python", "--color", "--managed-python"}
+    index = 1
+    while index < len(argv):
+        word = argv[index]
+        if word in global_operand_options:
+            index += 2
+            continue
+        if word.startswith("-"):
+            index += 1
+            continue
         if word in subcommands:
             return word, index
+        index += 1
     return None
 
 
@@ -200,7 +247,9 @@ def _argv_policy_failures(argv: Sequence[str], *, location: str) -> list[str]:
     if executable == "virtualenv" or executable == "mktemp":
         label = "alternate environment creation" if executable == "virtualenv" else "temporary workspace creation"
         failures.append(f"{location}: {label}")
-    if _is_python_executable(executable) and any(command[index : index + 2] == ["-m", "venv"] for index in range(len(command) - 1)):
+    if _is_python_executable(executable) and any(
+        command[index] == "-m" and command[index + 1] in {"venv", "virtualenv"} for index in range(len(command) - 1)
+    ):
         failures.append(f"{location}: alternate environment creation")
     if executable == "uv":
         located = _uv_subcommand(command)
@@ -226,6 +275,10 @@ def _argv_policy_failures(argv: Sequence[str], *, location: str) -> list[str]:
                     failures.append(f"{location}: active environment override")
                 if "--no-build-isolation" in uv_arguments:
                     failures.append(f"{location}: disabled build isolation")
+                if "--check" not in uv_arguments and not REQUIRED_SYNC_FLAGS.issubset(uv_arguments):
+                    failures.append(f"{location}: incomplete synchronization")
+            if subcommand == "run" and "--no-sync" not in uv_arguments:
+                failures.append(f"{location}: implicit synchronization")
     return list(dict.fromkeys(failures))
 
 
@@ -294,12 +347,15 @@ def _resolve_dotted_name(node: ast.expr, aliases: Mapping[str, str]) -> str | No
 
 
 def _argv_argument(node: ast.Call, name: str) -> ast.expr | None:
-    """Return the argv expression, binding keywords through the callee's real signature."""
-    if node.args:
-        return node.args[0]
-    parameter = _first_positional_parameter(name)
-    if parameter is None:
+    """Return the expression carrying argv, located through the callee's real signature."""
+    located = _argv_parameter(name)
+    if located is None:
         return None
+    parameter, index, variadic = located
+    if variadic and len(node.args) > index:
+        return ast.List(elts=list(node.args[index:]), ctx=ast.Load())
+    if len(node.args) > index:
+        return node.args[index]
     for keyword in node.keywords:
         if keyword.arg == parameter:
             return keyword.value
@@ -307,11 +363,15 @@ def _argv_argument(node: ast.Call, name: str) -> ast.expr | None:
 
 
 @cache
-def _first_positional_parameter(name: str) -> str | None:
-    """Name the parameter carrying argv, read from the callee's own signature.
+def _argv_parameter(name: str) -> tuple[str, int, bool] | None:
+    """Name and position the parameter carrying argv, read from the callee's own signature.
 
-    Functions that collect argv through ``*popenargs`` expose no such parameter,
-    yet forward it to a wrapped callable; resolve those through the wrapper.
+    Argv is not always the first argument: ``os.execv`` takes a path before it and
+    ``os.spawnv`` a mode and a file, so binding position zero inspects the wrong
+    expression. Functions that collect argv through ``*popenargs`` expose no such
+    parameter and forward it to a wrapped callable, which is resolved through that
+    wrapper. ``asyncio.create_subprocess_exec`` spreads argv across a leading
+    program and a variadic remainder, which is gathered back into one list.
     """
     module_name, _, attribute = name.rpartition(".")
     if not module_name:
@@ -321,12 +381,17 @@ def _first_positional_parameter(name: str) -> str | None:
         parameters = list(inspect.signature(target).parameters.values())
     except ImportError, AttributeError, TypeError, ValueError:
         return None
-    for parameter in parameters:
-        if parameter.kind is inspect.Parameter.VAR_POSITIONAL:
+    positional = [
+        parameter
+        for parameter in parameters
+        if parameter.kind in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.VAR_POSITIONAL}
+    ]
+    for index, parameter in enumerate(positional):
+        if parameter.kind is inspect.Parameter.VAR_POSITIONAL and index == 0:
             delegate = _forwarded_callee(target, parameter.name)
-            return _first_positional_parameter(f"{module_name}.{delegate}") if delegate else None
-        if parameter.kind in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}:
-            return parameter.name
+            return _argv_parameter(f"{module_name}.{delegate}") if delegate else None
+        if parameter.name in ARGV_PARAMETERS:
+            return parameter.name, index, parameter.kind is inspect.Parameter.VAR_POSITIONAL
     return None
 
 
@@ -461,6 +526,7 @@ def _workflow_policy_failures(path: Path) -> list[str]:
 
 def static_policy_failures() -> list[str]:
     failures = _markdown_policy_failures(ROOT / "README.md")
+    failures.extend(_markdown_policy_failures(ROOT / "AGENTS.md"))
     for path in sorted((ROOT / ".github" / "workflows").glob("*.y*ml")):
         failures.extend(_workflow_policy_failures(path))
     for path in sorted((ROOT / "scripts").rglob("*")):

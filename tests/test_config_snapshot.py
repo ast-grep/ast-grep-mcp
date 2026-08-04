@@ -395,6 +395,7 @@ def test_snapshot_rejects_custom_languages_that_share_a_private_resource_name(tm
 def test_snapshot_accepts_a_musl_keyed_native_library_on_linux(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(snapshot_module.platform, "system", lambda: "Linux")
     monkeypatch.setattr(snapshot_module.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(snapshot_module.platform, "libc_ver", lambda: ("", ""))
     parser = tmp_path / "parser.so"
     parser.write_bytes(b"musl parser bytes")
     config = (
@@ -410,6 +411,38 @@ def test_snapshot_accepts_a_musl_keyed_native_library_on_linux(tmp_path: Path, m
     )
     try:
         assert snapshot.capabilities["custom_languages"]
+    finally:
+        snapshot.close()
+
+
+def test_snapshot_selects_the_gnu_library_on_a_glibc_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(snapshot_module.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(snapshot_module.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(snapshot_module.platform, "libc_ver", lambda: ("glibc", "2.41"))
+    gnu = tmp_path / "gnu.so"
+    musl = tmp_path / "musl.so"
+    gnu.write_bytes(b"gnu parser")
+    musl.write_bytes(b"musl parser")
+    config = (
+        "ruleDirs: []\n"
+        "customLanguages:\n"
+        "  Demo:\n"
+        "    libraryPath:\n"
+        "      x86_64-unknown-linux-musl: musl.so\n"
+        "      x86_64-unknown-linux-gnu: gnu.so\n"
+        "    extensions: [demo]\n"
+    )
+    write_project_config(tmp_path, config)
+
+    snapshot = create_config_snapshot(
+        config_path="sgconfig.yml",
+        working_directory=tmp_path,
+        allowed_roots=(tmp_path.resolve(),),
+        trusted_native_libraries=((str(gnu), hashlib.sha256(gnu.read_bytes()).hexdigest()),),
+    )
+    try:
+        copied = next(snapshot.bundle_root.rglob("resources/native/*"))
+        assert copied.read_bytes() == gnu.read_bytes()
     finally:
         snapshot.close()
 
