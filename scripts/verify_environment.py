@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import ast
 import importlib
+import inspect
 import os
 import sys
-from collections.abc import Iterator, Mapping, Sequence
+import textwrap
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from functools import cache
 from pathlib import Path
 from typing import Any, Final, cast
 
@@ -38,8 +41,6 @@ PROCESS_CALLS: Final = frozenset(
         "subprocess.run",
         "main.run_ndjson_process",
         "main.run_text_process",
-        "run_ndjson_process",
-        "run_text_process",
     }
 )
 SHELL_PROCESS_CALLS: Final = frozenset(
@@ -50,7 +51,6 @@ SHELL_PROCESS_CALLS: Final = frozenset(
     }
 )
 TEMPORARY_APIS: Final = frozenset({"tempfile.mkdtemp", "tempfile.TemporaryDirectory"})
-ARGV_KEYWORDS: Final = frozenset({"args", "command"})
 
 
 def resolve_from_root(value: str) -> Path:
@@ -293,10 +293,55 @@ def _resolve_dotted_name(node: ast.expr, aliases: Mapping[str, str]) -> str | No
     return f"{resolved}.{tail}" if separator else resolved
 
 
-def _keyword_argument(node: ast.Call, names: frozenset[str]) -> ast.expr | None:
+def _argv_argument(node: ast.Call, name: str) -> ast.expr | None:
+    """Return the argv expression, binding keywords through the callee's real signature."""
+    if node.args:
+        return node.args[0]
+    parameter = _first_positional_parameter(name)
+    if parameter is None:
+        return None
     for keyword in node.keywords:
-        if keyword.arg in names:
+        if keyword.arg == parameter:
             return keyword.value
+    return None
+
+
+@cache
+def _first_positional_parameter(name: str) -> str | None:
+    """Name the parameter carrying argv, read from the callee's own signature.
+
+    Functions that collect argv through ``*popenargs`` expose no such parameter,
+    yet forward it to a wrapped callable; resolve those through the wrapper.
+    """
+    module_name, _, attribute = name.rpartition(".")
+    if not module_name:
+        return None
+    try:
+        target = cast(Callable[..., Any], getattr(importlib.import_module(module_name), attribute))
+        parameters = list(inspect.signature(target).parameters.values())
+    except ImportError, AttributeError, TypeError, ValueError:
+        return None
+    for parameter in parameters:
+        if parameter.kind is inspect.Parameter.VAR_POSITIONAL:
+            delegate = _forwarded_callee(target, parameter.name)
+            return _first_positional_parameter(f"{module_name}.{delegate}") if delegate else None
+        if parameter.kind in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}:
+            return parameter.name
+    return None
+
+
+def _forwarded_callee(target: Callable[..., Any], collected: str) -> str | None:
+    """Name the callable that receives ``*collected``, read from the callee's own source."""
+    try:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(target)))
+    except OSError, TypeError, SyntaxError, ValueError:
+        return None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for argument in node.args:
+            if isinstance(argument, ast.Starred) and _dotted_name(argument.value) == collected:
+                return _dotted_name(node.func)
     return None
 
 
@@ -337,7 +382,7 @@ def python_source_policy_failures(source: str, *, label: str, line_offset: int =
             continue
         if name not in PROCESS_CALLS:
             continue
-        argument = node.args[0] if node.args else _keyword_argument(node, ARGV_KEYWORDS)
+        argument = _argv_argument(node, name)
         if argument is None:
             continue
         argv = _literal_argv(argument)
