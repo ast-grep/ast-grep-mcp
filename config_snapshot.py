@@ -55,22 +55,22 @@ def _sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _directory_identity(directory: Path) -> int:
-    """Report the file type of a path without following it.
+def _directory_identity(directory: Path) -> tuple[int, bool]:
+    """Report the file type and link nature of a path without following it.
 
     The descriptor walker holds an O_NOFOLLOW handle, so the directory it reads
     is the directory it validated. The fallback reopens by name, leaving a window
     where the path may be replaced with a link to another tree between validation
     and traversal. Device and inode cannot settle that: deleting a directory frees
     its inode for immediate reuse, so a replacement link can carry the same number,
-    and Windows does not report a stable inode across calls. The file type does
-    distinguish the two, and it is what a swap has to change.
+    and Windows does not report a stable inode across calls. A junction reports
+    the directory type it replaced, so the reparse attribute is carried alongside.
     """
     try:
         metadata = os.stat(directory, follow_symlinks=False)
     except OSError as error:
         raise ValueError(f"Could not inspect configuration resource directory: {directory}") from error
-    return stat.S_IFMT(metadata.st_mode)
+    return stat.S_IFMT(metadata.st_mode), _is_link_like(metadata)
 
 
 def _count_visited_entry(writer: _BundleWriter, display_path: Path) -> None:
@@ -528,7 +528,7 @@ def _copy_directory(
             if _is_link_like(metadata):
                 raise ValueError(f"Configuration resources cannot contain symlinks or reparse points: {entry_path}")
             if stat.S_ISDIR(metadata.st_mode):
-                pending.append((entry_path, stat.S_IFMT(metadata.st_mode)))
+                pending.append((entry_path, (stat.S_IFMT(metadata.st_mode), _is_link_like(metadata))))
                 continue
             if not stat.S_ISREG(metadata.st_mode):
                 raise ValueError(f"Configuration resources must be regular files: {entry_path}")
@@ -946,13 +946,17 @@ def create_config_snapshot(
         native_hashes: dict[str, str] = {}
         used_trusted: set[Path] = set()
         copied_custom_languages: dict[str, Any] = {}
-        library_components: dict[str, str] = {}
+        normalized_language_names: dict[str, str] = {}
         if "customLanguages" in config:
             custom_languages = _mapping(config["customLanguages"], label="sgconfig.yml customLanguages")
             targets = _target_triples()
             for name, value in custom_languages.items():
                 if not name or "\0" in name:
                     raise ValueError("sgconfig.yml customLanguages contains an invalid language name")
+                component = _safe_component(name)
+                collision = normalized_language_names.setdefault(component, name)
+                if collision != name:
+                    raise ValueError(f"Custom languages {collision!r} and {name!r} both normalize to {component!r}; rename one")
                 custom = _mapping(value, label=f"sgconfig.yml customLanguages.{name}")
                 _reject_unknown_keys(custom, _CUSTOM_LANGUAGE_KEYS, label=f"sgconfig.yml customLanguages.{name}")
                 extensions = _string_list(
@@ -999,13 +1003,7 @@ def create_config_snapshot(
                     )
                 used_trusted.add(library_path)
                 suffix = "".join(library_path.suffixes)
-                component = f"{_safe_component(name)}{suffix}"
-                collision = library_components.setdefault(component, name)
-                if collision != name:
-                    raise ValueError(
-                        f"Custom languages {collision!r} and {name!r} both resolve to the private resource {component!r}; rename one"
-                    )
-                library_destination = Path(f"resources/native/{component}")
+                library_destination = Path(f"resources/native/{_safe_component(name)}{suffix}")
                 writer.add(library_destination, library_payload)
                 native_hashes[name] = actual_digest
 

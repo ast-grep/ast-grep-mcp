@@ -383,7 +383,7 @@ def test_snapshot_rejects_custom_languages_that_share_a_private_resource_name(tm
     write_project_config(tmp_path, config)
     trusted = tuple((str(path), hashlib.sha256(path.read_bytes()).hexdigest()) for path in (first, second))
 
-    with pytest.raises(ValueError, match="both resolve to the private resource"):
+    with pytest.raises(ValueError, match="both normalize to"):
         create_config_snapshot(
             config_path="sgconfig.yml",
             working_directory=tmp_path,
