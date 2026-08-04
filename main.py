@@ -2244,15 +2244,19 @@ class AstGrepService:
             return None
         if not rule_ids:
             raise ValueError("rule_ids must contain at least one configured rule id when provided")
-        unique: list[str] = []
         configured = set(configured_rule_ids)
+        if len(rule_ids) > len(configured):
+            raise ValueError(f"rule_ids must not exceed the {len(configured)} configured rule ids")
+        unique: list[str] = []
+        seen: set[str] = set()
         for rule_id_value in cast(Sequence[object], rule_ids):
             if not isinstance(rule_id_value, str) or not rule_id_value or "\0" in rule_id_value:
                 raise ValueError(f"Invalid configured rule id: {rule_id_value!r}")
             rule_id = rule_id_value
             if rule_id not in configured:
                 raise ValueError(f"Unknown configured rule id: {rule_id}")
-            if rule_id not in unique:
+            if rule_id not in seen:
+                seen.add(rule_id)
                 unique.append(rule_id)
         return rf"^(?:{'|'.join(re.escape(rule_id) for rule_id in unique)})$"
 

@@ -187,7 +187,10 @@ uv lock --check
 uv run --no-sync ruff check .
 uv run --no-sync ruff format --check .
 uv run --no-sync mypy main.py config_snapshot.py scripts tests
+uv run --no-sync mypy --platform win32 main.py config_snapshot.py scripts tests
 uv run --no-sync pyright
+uv run --no-sync pyright --pythonplatform Windows
+uv run --no-sync pyright --pythonplatform Linux
 uv run --no-sync pytest tests/test_unit.py tests/test_config_snapshot.py tests/test_environment_policy.py \
   --cov=main --cov=config_snapshot --cov-report=term-missing
 AST_GREP_TEST_EXECUTABLE=/absolute/path/to/ast-grep \

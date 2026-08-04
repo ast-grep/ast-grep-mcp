@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 
 from verify_environment import (
     EXPECTED_ENVIRONMENT,
@@ -19,31 +20,36 @@ def _pin_project_environment() -> None:
 
 
 def _check_locked_environment() -> None:
-    from main import MAX_SUBPROCESS_DIAGNOSTIC_BYTES, run_text_process
+    """Confirm the environment is synchronized using only the standard library.
 
+    Importing the server first would fail on a partially synchronized environment
+    and report a missing dependency traceback, hiding the unsynchronized state
+    this check exists to name.
+    """
     executable = shutil.which("uv")
     if executable is None:
         raise SystemExit("uv is required to verify the repository environment")
-    result = run_text_process(
-        [
-            executable,
-            "--directory",
-            str(ROOT),
-            "--no-python-downloads",
-            "sync",
-            "--no-active",
-            "--locked",
-            "--check",
-            "--all-extras",
-        ],
-        timeout_seconds=30,
-        working_directory=ROOT,
-        stdout_limit=MAX_SUBPROCESS_DIAGNOSTIC_BYTES,
-        stderr_limit=MAX_SUBPROCESS_DIAGNOSTIC_BYTES,
-        truncate_stdout=False,
-        truncate_stderr=False,
-    )
-    completed = result.completed
+    try:
+        completed = subprocess.run(
+            [
+                executable,
+                "--directory",
+                str(ROOT),
+                "--no-python-downloads",
+                "sync",
+                "--no-active",
+                "--locked",
+                "--check",
+                "--all-extras",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=ROOT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise SystemExit(f"repository environment check could not run: {error}") from error
     if completed.returncode != 0:
         diagnostic = completed.stderr.strip() or completed.stdout.strip() or "uv returned no diagnostic"
         raise SystemExit(f"repository environment is not synchronized: {diagnostic}")
