@@ -19,6 +19,7 @@
 - Type-check the other platforms, because platform-specific stubs change which branches resolve: `uv run --no-sync mypy --platform win32 main.py config_snapshot.py scripts tests` and `uv run --no-sync pyright --pythonplatform Windows`.
 - Treat byte offsets, digests, and file contents as line-ending dependent. Fixtures write through `newline=""`, and assertions derive offsets from the bytes on disk rather than hardcoding values that only hold under LF.
 - Confirm a clean environment can still build the project. `uv run --no-sync` never exercises the build, so a missing build dependency stays invisible locally while every CI job fails at its first step.
+- `platform.libc_ver` names the C library rather than reporting only glibc. Alpine answers `("musl", "1")` and a generic scan answers `("libc", ...)`, so a truthy name is not evidence of glibc. Test the name, and measure on `python:3.14-alpine` as well as `python:3.14-slim`.
 
 # Writing code here
 
@@ -42,6 +43,7 @@ A type check cannot reach these; only executing the test on the other platform c
 - `chmod` sets only the read-only flag on Windows; every other bit is ignored. Guard mode assertions with `os.name == "posix"`.
 - `os.scandir` receives a `Path` for source trees and a `str` or descriptor elsewhere, and directory entries arrive in filesystem order. A test that patches it must accept every form and must not assume which entry is reached first.
 - Resolving a path that was just replaced with a symlink follows the link to its target, so a comparison against the pre-swap path stops matching. Match on the entry name instead.
+- Windows defines neither `O_NOFOLLOW` nor `dir_fd`, so `os.open` there follows whatever the name denotes and no public API refuses. Validating a name before opening it proves nothing on that platform; revalidate once the descriptor is held, and state in the docstring that a link restored before the recheck still passes.
 
 # Running the suite on Linux
 

@@ -481,6 +481,21 @@ def test_snapshot_does_not_treat_a_named_libc_as_glibc(tmp_path: Path, monkeypat
         snapshot.close()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires symlink creation without elevation")
+def test_read_file_rejects_a_link_when_the_platform_cannot_refuse_to_follow_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows defines no O_NOFOLLOW and no dir_fd, so the fallback open follows the name."""
+    outside = tmp_path / "outside.txt"
+    outside.write_text("data beyond the allowed roots", encoding="utf-8")
+    resource = tmp_path / "resource.yml"
+    resource.symlink_to(outside)
+
+    monkeypatch.setattr(snapshot_module.os, "supports_dir_fd", frozenset())
+    monkeypatch.delattr(snapshot_module.os, "O_NOFOLLOW", raising=False)
+
+    with pytest.raises(ValueError, match="replaced with a link"):
+        snapshot_module._read_file(resource, byte_limit=1024, label="configuration resource")
+
+
 def test_snapshot_bounds_yaml_nodes_across_every_resource(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(snapshot_module, "MAX_SNAPSHOT_YAML_NODES", 200)
     rules = tmp_path / "rules"

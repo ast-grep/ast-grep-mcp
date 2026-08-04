@@ -303,20 +303,52 @@ def _open_directory_chain(path: Path, *, boundary: Path, label: str) -> int:
         raise
 
 
+def _assert_opened_name_is_not_a_link(path: Path, *, label: str) -> None:
+    """Confirm a name opened without O_NOFOLLOW still denotes a regular file.
+
+    Windows defines no O_NOFOLLOW and admits no descriptor-relative open, so that
+    branch opens whatever the name denotes at that instant. A link substituted after
+    the traversal validated the entry is therefore followed, and the reader would see
+    only the regular file it resolves to, outside the allowed roots. Restating the
+    check once the descriptor is held detects the substitution, because a
+    non-following stat reports the link while the descriptor already holds its target.
+
+    The comparison rests on file type and the reparse attribute rather than inode
+    numbers, for the reason recorded in _directory_identity: Linux reuses a freed
+    inode immediately and Windows reports no stable number across calls.
+
+    This narrows the window rather than closing it. A link restored to the original
+    file between the open and this stat still passes, and no public Python API opens
+    a file without following it on Windows.
+    """
+    try:
+        named = os.stat(path, follow_symlinks=False)
+    except OSError as error:
+        raise ValueError(f"Could not revalidate {label}: {path}") from error
+    if _is_link_like(named):
+        raise ValueError(f"{label} was replaced with a link while it was being opened: {path}")
+    if not stat.S_ISREG(named.st_mode):
+        raise ValueError(f"{label} is not a regular file: {path}")
+
+
 def _read_file(path: Path, *, byte_limit: int, label: str, boundary: Path | None = None) -> bytes:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     directory_descriptor: int | None = None
+    opened_by_name = False
     try:
         if boundary is not None and os.open in os.supports_dir_fd:
             directory_descriptor = _open_directory_chain(path.parent, boundary=boundary, label=label)
             descriptor = os.open(path.name, flags, dir_fd=directory_descriptor)
         else:
+            opened_by_name = True
             descriptor = os.open(path, flags)
     except OSError as error:
         if directory_descriptor is not None:
             os.close(directory_descriptor)
         raise ValueError(f"Could not securely open {label}: {path}") from error
     try:
+        if opened_by_name:
+            _assert_opened_name_is_not_a_link(path, label=label)
         return _read_open_file(descriptor, path, byte_limit=byte_limit, label=label)
     finally:
         os.close(descriptor)
