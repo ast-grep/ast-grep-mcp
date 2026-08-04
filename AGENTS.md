@@ -20,6 +20,19 @@
 - Treat byte offsets, digests, and file contents as line-ending dependent. Fixtures write through `newline=""`, and assertions derive offsets from the bytes on disk rather than hardcoding values that only hold under LF.
 - Confirm a clean environment can still build the project. `uv run --no-sync` never exercises the build, so a missing build dependency stays invisible locally while every CI job fails at its first step.
 
+# Writing code here
+
+- Explain intent in a docstring or in clearer code. Source and tests carry no comments, and `test_repository_python_carries_no_comment_tokens` fails on any that appear.
+- Derive a value from the thing that owns it rather than restating it. A parameter name comes from the callee's signature, a delegation target from the caller's own source, a platform key from the mapping the operator wrote. A hand-maintained list of names, spellings, or positions drifts from its source and misses the cases nobody thought to enumerate.
+- Read every position a value can occupy before binding one. Argv is the first argument to `subprocess.run`, the second to `os.execv`, and the third to `os.spawnv`; a checker that assumes the first inspects the wrong expression and reports success.
+
+# Fixing a reported defect
+
+- Reproduce the defect before changing anything, and confirm the reproduction fails once the fix is removed. A check that passes with and without its fix proves nothing.
+- Fix the class, not the instance. A guard keyed on a name plus a suffix still collides when the suffixes differ; a rejection of symlinks still admits a junction. Ask which other inputs reach the same line before declaring it closed.
+- Re-read the adjacent guards afterwards. Both times a fix here proved incomplete, the module already contained the predicate that would have closed it, and the fix simply did not call it.
+- State a dismissal with the evidence that supports it, in a reply on the thread. An unanswered finding returns on the next revision.
+
 # Filesystem behaviour that differs by platform
 
 A type check cannot reach these; only executing the test on the other platform can. When a change touches path traversal, permissions, or process teardown, run its test on Linux before pushing, and read the assertion below before writing a new one.

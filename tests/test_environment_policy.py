@@ -5,6 +5,7 @@ import importlib.util
 import os
 import subprocess
 import sys
+import tokenize
 from pathlib import Path
 from types import ModuleType
 from typing import Protocol, cast
@@ -135,6 +136,22 @@ def test_environment_checker_does_not_import_regular_expressions() -> None:
 
 def test_current_verification_surfaces_follow_environment_policy() -> None:
     assert verify_environment.static_policy_failures() == []
+
+
+def test_repository_python_carries_no_comment_tokens() -> None:
+    root = verify_environment.ROOT
+    sources = [root / "main.py", root / "config_snapshot.py"]
+    sources.extend(sorted((root / "scripts").rglob("*.py")))
+    sources.extend(path for path in sorted((root / "tests").rglob("*.py")) if "fixtures" not in path.parts)
+    found: list[str] = []
+    for source in sources:
+        if "__pycache__" in source.parts:
+            continue
+        with tokenize.open(source) as handle:
+            for token in tokenize.generate_tokens(handle.readline):
+                if token.type in {tokenize.COMMENT, tokenize.TYPE_COMMENT}:
+                    found.append(f"{source.relative_to(root)}:{token.start[0]}: {token.string}")
+    assert found == [], "explain intent in a docstring or clearer code rather than a comment"
 
 
 def test_environment_preflight_rejects_an_external_python_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
