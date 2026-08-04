@@ -447,6 +447,18 @@ def test_snapshot_selects_the_gnu_library_on_a_glibc_host(tmp_path: Path, monkey
         snapshot.close()
 
 
+def test_snapshot_bounds_yaml_nodes_across_every_resource(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(snapshot_module, "MAX_SNAPSHOT_YAML_NODES", 200)
+    rules = tmp_path / "rules"
+    rules.mkdir()
+    body = "id: r{}\nlanguage: Python\nrule:\n  any:\n" + "".join(f"    - kind: k{index}\n" for index in range(20))
+    for number in range(20):
+        (rules / f"r{number}.yml").write_text(body.format(number), encoding="utf-8", newline="")
+
+    with pytest.raises(ValueError, match="aggregate YAML limit"):
+        create_snapshot(tmp_path, "ruleDirs: [rules]\n")
+
+
 def test_snapshot_creates_an_empty_configured_test_directory(tmp_path: Path) -> None:
     (tmp_path / "rule-tests").mkdir()
 

@@ -31,6 +31,7 @@ MAX_NATIVE_LIBRARY_BYTES: Final = 16 * 1024 * 1024
 MAX_YAML_DOCUMENTS: Final = 64
 MAX_YAML_NODES: Final = 10_000
 MAX_YAML_DEPTH: Final = 64
+MAX_SNAPSHOT_YAML_NODES: Final = 200_000
 RUNTIME_DIRECTORY_NAME: Final = ".project-sast-runtime"
 
 _CONFIG_KEYS: Final = frozenset({"ruleDirs", "testConfigs", "utilDirs", "customLanguages", "languageGlobs", "languageInjections"})
@@ -323,12 +324,41 @@ def _read_file(path: Path, *, byte_limit: int, label: str, boundary: Path | None
             os.close(directory_descriptor)
 
 
-def _decode_yaml(payload: bytes, *, label: str) -> tuple[str, list[object]]:
+def _decode_yaml(payload: bytes, *, label: str, budget: _NodeBudget | None = None) -> tuple[str, list[object]]:
     try:
         text = payload.decode("utf-8")
     except UnicodeDecodeError as error:
         raise ValueError(f"{label} must be valid UTF-8") from error
-    return text, load_strict_yaml_documents(text, label=label)
+    documents = load_strict_yaml_documents(text, label=label)
+    if budget is not None:
+        budget.charge(_count_yaml_nodes(documents), label=label)
+    return text, documents
+
+
+def _count_yaml_nodes(value: object) -> int:
+    if isinstance(value, dict):
+        return 1 + sum(_count_yaml_nodes(item) for item in cast(dict[object, object], value).values())
+    if isinstance(value, list):
+        return 1 + sum(_count_yaml_nodes(item) for item in cast(list[object], value))
+    return 1
+
+
+@dataclass
+class _NodeBudget:
+    """Carry one YAML node allowance across every resource in a snapshot.
+
+    The per-file limits bound a single document, so a configuration spread over
+    the permitted file count could retain that allowance once per file and still
+    expand into far more objects than any individual limit suggests.
+    """
+
+    limit: int = field(default_factory=lambda: MAX_SNAPSHOT_YAML_NODES)
+    used: int = 0
+
+    def charge(self, nodes: int, *, label: str) -> None:
+        self.used += nodes
+        if self.used > self.limit:
+            raise ValueError(f"Configuration exceeds the {self.limit}-node aggregate YAML limit: {label}")
 
 
 class _BundleWriter:
@@ -502,6 +532,7 @@ def _copy_directory(
     yaml_only: bool,
     yaml_documents: list[tuple[str, list[dict[str, Any]]]],
     boundary: Path,
+    budget: _NodeBudget,
 ) -> None:
     writer.reserve(destination)
     if os.open in os.supports_dir_fd:
@@ -519,6 +550,7 @@ def _copy_directory(
                 yaml_only=yaml_only,
                 yaml_documents=yaml_documents,
                 depth=0,
+                budget=budget,
             )
         finally:
             os.close(descriptor)
@@ -552,7 +584,7 @@ def _copy_directory(
             relative = entry_path.relative_to(source)
             writer.add(destination / relative, payload)
             if entry_path.suffix.lower() in {".yml", ".yaml"}:
-                _, documents = _decode_yaml(payload, label=f"configuration resource {entry_path}")
+                _, documents = _decode_yaml(payload, label=f"configuration resource {entry_path}", budget=budget)
                 yaml_documents.append(
                     (entry_path.as_posix(), _iter_yaml_documents(documents, label=f"configuration resource {entry_path}"))
                 )
@@ -568,6 +600,7 @@ def _copy_directory_descriptor(
     yaml_only: bool,
     yaml_documents: list[tuple[str, list[dict[str, Any]]]],
     depth: int,
+    budget: _NodeBudget,
 ) -> None:
     if depth > MAX_YAML_DEPTH:
         raise ValueError(f"Configuration resource directory exceeds the {MAX_YAML_DEPTH}-level depth limit")
@@ -603,6 +636,7 @@ def _copy_directory_descriptor(
                     yaml_only=yaml_only,
                     yaml_documents=yaml_documents,
                     depth=depth + 1,
+                    budget=budget,
                 )
             finally:
                 os.close(child_descriptor)
@@ -627,7 +661,7 @@ def _copy_directory_descriptor(
             os.close(file_descriptor)
         writer.add(destination / child_relative, payload)
         if suffix in {".yml", ".yaml"}:
-            _, documents = _decode_yaml(payload, label=f"configuration resource {display_path}")
+            _, documents = _decode_yaml(payload, label=f"configuration resource {display_path}", budget=budget)
             yaml_documents.append(
                 (display_path.as_posix(), _iter_yaml_documents(documents, label=f"configuration resource {display_path}"))
             )
@@ -799,6 +833,7 @@ def create_config_snapshot(
                 raise ValueError(f"Trusted native library has conflicting SHA-256 values: {path}")
             trusted[path] = digest
 
+        node_budget = _NodeBudget()
         rule_dirs = _string_list(config.get("ruleDirs", []), label="sgconfig.yml ruleDirs", allow_empty=False)
         util_dirs = _string_list(config.get("utilDirs", []), label="sgconfig.yml utilDirs", allow_empty=False)
         copied_rule_dirs: list[str] = []
@@ -824,6 +859,7 @@ def create_config_snapshot(
                 yaml_only=True,
                 yaml_documents=rule_documents,
                 boundary=config_directory,
+                budget=node_budget,
             )
             copied_rule_dirs.append(destination.as_posix())
 
@@ -845,6 +881,7 @@ def create_config_snapshot(
                 yaml_only=True,
                 yaml_documents=util_documents,
                 boundary=config_directory,
+                budget=node_budget,
             )
             copied_util_dirs.append(destination.as_posix())
 
@@ -902,6 +939,7 @@ def create_config_snapshot(
                 yaml_only=False,
                 yaml_documents=ignored_documents,
                 boundary=config_directory,
+                budget=node_budget,
             )
             copied_test: dict[str, Any] = {"testDir": destination.as_posix()}
             snapshot_dir = test.get("snapshotDir")
