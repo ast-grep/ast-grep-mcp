@@ -306,20 +306,8 @@ def _open_directory_chain(path: Path, *, boundary: Path, label: str) -> int:
 def _assert_opened_name_is_not_a_link(path: Path, *, label: str) -> None:
     """Confirm a name opened without O_NOFOLLOW still denotes a regular file.
 
-    Windows defines no O_NOFOLLOW and admits no descriptor-relative open, so that
-    branch opens whatever the name denotes at that instant. A link substituted after
-    the traversal validated the entry is therefore followed, and the reader would see
-    only the regular file it resolves to, outside the allowed roots. Restating the
-    check once the descriptor is held detects the substitution, because a
-    non-following stat reports the link while the descriptor already holds its target.
-
-    The comparison rests on file type and the reparse attribute rather than inode
-    numbers, for the reason recorded in _directory_identity: Linux reuses a freed
-    inode immediately and Windows reports no stable number across calls.
-
-    This narrows the window rather than closing it. A link restored to the original
-    file between the open and this stat still passes, and no public Python API opens
-    a file without following it on Windows.
+    Windows has neither O_NOFOLLOW nor dir_fd, so the open follows the name. A link
+    restored before this recheck still passes.
     """
     try:
         named = os.stat(path, follow_symlinks=False)
@@ -700,16 +688,9 @@ def _copy_directory_descriptor(
 
 
 def _target_triples() -> tuple[str, ...]:
-    """List the platform keys a configured libraryPath mapping may use, most specific first.
+    """List the platform keys a libraryPath mapping may use, most specific first.
 
-    ast-grep documents libraryPath as a plain path, so the platform-keyed mapping
-    is this server's own extension and these keys are its vocabulary. Linux has two
-    incompatible C libraries, and platform.libc_ver names the one this interpreter
-    is linked against. Only "glibc" and "musl" identify a triple; it also answers
-    "libc" when it recognises the symbols but not the implementation, "emscripten",
-    and an empty string when the scan finds nothing. Every answer other than the
-    two named ones keeps both Linux keys and lets the configured mapping decide,
-    because a truthy name is not by itself evidence of glibc.
+    libc_ver names the C library, so a truthy name is not evidence of glibc.
     """
     system = platform.system().lower()
     machine = platform.machine().lower()
