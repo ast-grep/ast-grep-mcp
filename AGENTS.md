@@ -7,7 +7,7 @@
 - Never create or run another virtual environment for this repository.
 - Never create an alternate checkout, copied working tree, packaging workspace, or verification workspace outside this repository.
 - Do not use `uvx`, `uv tool`, `uv python install`, `uv venv`, `python -m venv`, `virtualenv`, `uv run --isolated`, `uv run --with`, `--active`, `mktemp`, an external temporary path, a uv cache environment, or an alternate `UV_PROJECT_ENVIRONMENT` in development, build, packaging, or verification commands.
-- Build distributions with `python -m build --sdist --wheel --no-isolation` through the locked repository environment.
+- Build distributions with `python -m build --sdist --wheel --no-isolation` through the locked repository environment. An in-tree build desynchronizes the launcher's `uv sync --check` gate, and deleting `sg_mcp.egg-info/`, `build/`, and `dist/` does not restore it; re-run the synchronization command after building.
 - Validate distribution archives in place. Do not extract or install them into another environment for smoke testing.
 - Run `uv run --no-sync python scripts/verify_environment.py` after synchronization and before verification. Treat any failure as a hard failure.
 - Launch the stdio server through `scripts/launch_server.py`; it checks the lock, synchronized environment, and repository boundary before serving.
