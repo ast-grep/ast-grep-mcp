@@ -1,0 +1,8 @@
+id: configured-print
+snapshots:
+  print('value'):
+    labels:
+      - source: print('value')
+        style: primary
+        start: 0
+        end: 14

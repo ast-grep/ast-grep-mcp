@@ -1,0 +1,208 @@
+name: Release
+
+permissions:
+  contents: read
+
+'on':
+  push:
+    tags:
+    - 'v*'
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  UV_PROJECT_ENVIRONMENT: .venv
+
+jobs:
+  verify-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+    - name: Git Checkout
+      uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+    - name: Set up Python
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version-file: .python-version
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
+      with:
+        enable-cache: true
+
+    - name: Install dependencies
+      run: uv sync --locked --all-extras --dev --no-python-downloads
+
+    - name: Verify repository environment
+      run: uv run --no-sync python scripts/verify_environment.py
+
+    - name: Verify release tag
+      id: version
+      run: |
+        version="$(uv run --no-sync python -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+        test "$GITHUB_REF_TYPE" = "tag"
+        test "$GITHUB_REF_NAME" = "v$version"
+        printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: verify-tag
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+    - name: Git Checkout
+      uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+    - name: Set up Python
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version-file: .python-version
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
+      with:
+        enable-cache: true
+
+    - name: Install dependencies
+      run: uv sync --locked --all-extras --dev --no-python-downloads
+
+    - name: Verify repository environment
+      run: uv run --no-sync python scripts/verify_environment.py
+
+    - name: Verify lock file
+      run: uv lock --check
+
+    - name: Install and verify ast-grep
+      run: |
+        version="$(uv run --no-sync python -c 'import main; print(main.SUPPORTED_AST_GREP_VERSION)')"
+        test "$version" = "0.45.0"
+        npm install \
+          --prefix .ci-tools \
+          --no-save \
+          --package-lock=false \
+          "@ast-grep/cli@${version}"
+        executable="$(node -e '
+          const path = require("node:path")
+          const name = process.platform === "win32" ? "ast-grep.cmd" : "ast-grep"
+          process.stdout.write(path.resolve(".ci-tools/node_modules/.bin", name))
+        ')"
+        node -e '
+          const fs = require("node:fs")
+          if (!fs.statSync(process.argv[1]).isFile()) process.exit(1)
+        ' "$executable"
+        export PATH="$PWD/.ci-tools/node_modules/.bin:$PATH"
+        reported_version="$(ast-grep --version)"
+        test "$reported_version" = "ast-grep 0.45.0"
+        printf 'AST_GREP_TEST_EXECUTABLE=%s\n' "$executable" >> "$GITHUB_ENV"
+
+    - name: Check diff whitespace
+      run: git diff --check
+
+    - name: Lint with ruff
+      run: uv run --no-sync ruff check .
+
+    - name: Format check with ruff
+      run: uv run --no-sync ruff format --check .
+
+    - name: Type check with mypy
+      run: uv run --no-sync mypy main.py config_snapshot.py scripts tests
+
+    - name: Type check with pyright
+      run: uv run --no-sync pyright
+
+    - name: Smoke test packaged entry point
+      run: uv run --no-sync ast-grep-server --help
+
+    - name: Smoke test repository launcher
+      run: uv run --no-sync python scripts/launch_server.py --help
+
+    - name: Run unit tests
+      env:
+        # config_snapshot.py's dir_fd copy walker is POSIX-only and unreachable on
+        # Windows, so the shared threshold is enforced on Linux and macOS instead.
+        COVERAGE_THRESHOLD: ${{ runner.os == 'Windows' && '0' || '84' }}
+      run: uv run --no-sync pytest tests/test_unit.py tests/test_config_snapshot.py tests/test_environment_policy.py -v --cov=main --cov=config_snapshot --cov-report=term-missing --cov-fail-under "$COVERAGE_THRESHOLD"
+
+    - name: Run integration tests
+      run: uv run --no-sync pytest tests/test_integration.py -v
+
+  build:
+    needs: [verify-tag, test]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Git Checkout
+      uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+    - name: Set up Python
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version-file: .python-version
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
+      with:
+        enable-cache: true
+
+    - name: Install dependencies
+      run: uv sync --locked --all-extras --dev --no-python-downloads
+
+    - name: Verify repository environment
+      run: uv run --no-sync python scripts/verify_environment.py
+
+    - name: Build distributions
+      run: uv run --no-sync python -m build --sdist --wheel --no-isolation
+
+    - name: Check distributions
+      env:
+        RELEASE_VERSION: ${{ needs.verify-tag.outputs.version }}
+      run: |
+        wheel="dist/sg_mcp-${RELEASE_VERSION}-py3-none-any.whl"
+        sdist="dist/sg_mcp-${RELEASE_VERSION}.tar.gz"
+        test -f "$wheel"
+        test -f "$sdist"
+        test "$(find dist -maxdepth 1 -type f -name '*.whl' | wc -l | tr -d ' ')" -eq 1
+        test "$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l | tr -d ' ')" -eq 1
+        uv run --no-sync twine check --strict "$wheel" "$sdist"
+        uv run --no-sync check-wheel-contents "$wheel"
+
+    - name: Smoke test distributions
+      env:
+        RELEASE_VERSION: ${{ needs.verify-tag.outputs.version }}
+      run: |
+        uv run --no-sync python tests/package_smoke.py \
+          "dist/sg_mcp-${RELEASE_VERSION}-py3-none-any.whl" \
+          "dist/sg_mcp-${RELEASE_VERSION}.tar.gz" \
+          "$RELEASE_VERSION"
+
+    - name: Upload distributions
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: distributions
+        path: dist/*
+        if-no-files-found: error
+        retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/sg-mcp
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+    - name: Download distributions
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        name: distributions
+        path: dist
+
+    - name: Publish to PyPI
+      uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33

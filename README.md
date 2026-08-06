@@ -1,103 +1,158 @@
-# Inspect code with ProjectSAST
+# ProjectSAST
 
-ProjectSAST is a bounded, read-only [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for structural code inspection with [ast-grep](https://ast-grep.github.io/). It exposes six tools over standard input/output (stdio), performs no rewrites, and constrains every caller-selected project artifact to configured roots.
+ProjectSAST is a bounded, read-only [Model Context Protocol](https://modelcontextprotocol.io/) server for structural code inspection with [ast-grep](https://ast-grep.github.io/). Version 0.4.0 exposes exactly eight tools over stdio, never applies rewrites, and confines caller-selected files to operator-approved roots.
 
-## Requirements
+## Guarantees
 
-Install these runtime dependencies:
+- Exact ast-grep 0.45.0 runtime compatibility
+- Python 3.14.6 with a locked `uv` environment
+- stdio transport only
+- Finite input, output, diagnostic, timeout, and result limits
+- Process-group termination and reaping on timeout, overflow, malformed output, or result saturation
+- Strict typed validation of ast-grep 0.45 match and outline records
+- Immutable startup configuration copied into a private read-only bundle
+- Read-only rewrite previews, including deletion previews
+- Modern and legacy MCP protocol compatibility
 
-- Python 3.13 or newer
-- [uv](https://docs.astral.sh/uv/)
-- ast-grep 0.45.0
+## Install
 
-The server rejects every ast-grep version other than 0.45.0. `SUPPORTED_AST_GREP_VERSION` in `main.py` owns that version: the test suites and the CI workflow both read it, so a bump changes one line of code and the prose below. Install and verify the tested command-line interface (CLI) release:
+Install the locked Python environment and exact native CLI:
 
 ```bash
+uv sync --locked --all-extras --dev --no-python-downloads
 npm install --global @ast-grep/cli@0.45.0
 ast-grep --version
 ```
 
+The server refuses to start unless the CLI reports exactly `ast-grep 0.45.0`.
+
 ## Run the stdio server
 
-Pin MCP consumers to an immutable commit SHA:
+Run the checked-out repository through its existing synchronized environment:
 
 ```bash
-uvx \
-  --from git+https://github.com/jmclaughlin724/ast-grep-mcp@commit_sha \
-  ast-grep-server \
+export UV_PROJECT_ENVIRONMENT=.venv
+uv --directory /absolute/path/to/ast-grep-mcp \
+  --no-python-downloads \
+  run --no-active --no-sync python scripts/launch_server.py \
   --ast-grep /absolute/path/to/ast-grep \
   --allowed-root /absolute/path/to/project \
   --config /absolute/path/to/project/sgconfig.yml \
   --forbid-regex-rules
 ```
 
-ProjectSAST supports stdio only. It doesn't expose Server-Sent Events (SSE), Streamable HTTP, a transport selector, or a network port.
+ProjectSAST does not expose HTTP, Server-Sent Events, a transport selector, or a network port.
 
-## Configure the server
+## Runtime configuration
 
-These command arguments define the runtime contract:
-
-| Option | Default | Purpose |
+| Option | Default | Effect |
 | --- | --- | --- |
-| `--ast-grep PATH` | `ast-grep` | Resolve one ast-grep executable before serving requests. |
-| `--allowed-root PATH` | Process working directory | Permit projects only inside this real path. Repeat the option to add roots. |
-| `--config PATH` | Unset | Use one contained `sgconfig.yml`, including configured custom languages. |
-| `--command-timeout SECONDS` | `30` | Bound each ast-grep subprocess. |
-| `--default-max-results COUNT` | `50` | Set the finite result limit used when a call omits `max_results`. |
-| `--max-results-cap COUNT` | `500` | Lower the runtime ceiling for caller-selected result limits. |
-| `--forbid-regex-rules` | Off | Reject inline YAML containing an ast-grep `regex` matcher key. |
+| `--ast-grep PATH` | `ast-grep` | Resolves and verifies one ast-grep executable before serving requests. |
+| `--allowed-root PATH` | Process working directory | Adds an approved real-path root. Repeat for multiple roots. |
+| `--config PATH` | Unset | Loads one contained `sgconfig.yml` at startup. |
+| `--trusted-native-library PATH SHA256` | None | Trusts one configured native parser by exact path and SHA-256. Repeat for every active parser. |
+| `--command-timeout SECONDS` | `30` | Bounds each subprocess. |
+| `--default-max-results COUNT` | `50` | Supplies the result limit omitted by a caller. |
+| `--max-results-cap COUNT` | `500` | Lowers the caller-selectable result ceiling. |
+| `--forbid-regex-rules` | Off | Rejects any inline YAML rule containing a `regex` key. |
 
-Equivalent environment variables configure the executable, config, timeout, result limits, and regex policy. Prefer arguments in checked-in launchers so reviewers can see the effective contract.
+The executable, config, timeout, result limits, and regex policy also support their documented `AST_GREP_*` environment variables. `get_server_info` reports the effective contract.
 
-The static MCP schemas allow `max_results` values through 500. An operator can configure a lower runtime cap. `get_server_info` reports that cap, and calls above it fail validation.
+## Immutable configuration snapshot
 
-## Understand containment and input limits
+When `--config` is present, startup validates `sgconfig.yml` and all active resources before the MCP server begins reading requests. It rejects:
 
-Project, search, outline, symlink-target, and config paths resolve before use. Caller-controlled paths and configs must stay inside an allowed root. Search paths stay inside the selected project.
+- symlinks, Windows reparse points, and path escapes;
+- unknown ast-grep 0.45 configuration keys;
+- YAML aliases, anchors, explicit tags, merge keys, duplicate keys, and non-string keys;
+- excessive YAML depth, document count, or node count;
+- duplicate rule IDs and zero-progress utility-rule cycles;
+- native parser libraries without an exact operator-supplied SHA-256.
 
-`dump_syntax_tree` uses a fresh, empty internal temporary directory. That sandbox can sit outside the allowed roots because it contains no user files. The server removes it after the syntax probe, including error paths.
+Documented recursion through `has`, `inside`, `precedes`, and `follows` remains valid because those relations advance to another syntax node.
 
-Inline YAML has a 64 KiB input limit. This limit doesn't guarantee that the resulting subprocess command fits the operating system's launch budget. Before launch, the server budgets the fully quoted command and environment. Windows limits the complete command line to 32,767 characters; POSIX systems derive their available argument and environment budget from `SC_ARG_MAX`. A request that exceeds the platform budget fails before process creation with an actionable validation error.
+Active rules, utilities, tests, snapshots, outline definitions, and trusted native parsers are copied into a private bundle. Its files become read-only before serving. ProjectSAST generates three configurations:
 
-## Use the six tools
+1. inline searches and outlines with no configured project rules;
+2. configured scans with only retained `ruleDirs` and `utilDirs`;
+3. configured tests with retained rules, utilities, `testConfigs`, and snapshots.
 
-Every tool advertises read-only, non-destructive, idempotent, and closed-world MCP annotations.
+The original files are never reloaded during the session. Mutating them after startup does not alter active behavior.
 
-### `dump_syntax_tree`
+## Resource limits
 
-Inspect how ast-grep parses code or a query pattern. Select `cst` for concrete target syntax and `pattern` while developing a structural query.
+| Resource | Limit |
+| --- | ---: |
+| Snippet or stdin input | 1 MiB |
+| Inline YAML rule | 64 KiB |
+| One NDJSON record | 1 MiB |
+| Aggregate structured output | 4 MiB |
+| Subprocess diagnostics | 64 KiB |
+| Configured-test report | 64 KiB |
+| Startup config file | 1 MiB |
+| Retained configuration resources | 16 MiB across 1,024 files |
+| Trusted native parser library | 16 MiB each |
+| YAML documents | 64 |
+| YAML nodes | 10,000 |
+| YAML depth | 64 |
+| Outline file paths | 64 |
+| Hard result ceiling | 500 |
+| Windows process creation | 32,767 UTF-16 characters |
+| POSIX process creation | Runtime `ARG_MAX` minus 2,048 bytes |
+| Process termination grace | 2 seconds |
 
-### `test_match_code_rule`
+NDJSON must be complete, newline-terminated UTF-8. Empty, malformed, non-object, incomplete, oversized, or schema-invalid records fail closed. Unknown upstream object fields are retained.
 
-Test inline YAML with `id`, `language`, and `rule` fields against a code snippet. A valid negative probe returns an empty match list.
+Before process creation, ProjectSAST also checks the complete command and environment against Windows `CreateProcessW` or POSIX `ARG_MAX` limits.
 
-### `find_code`
+## Eight-tool API
 
-Search with a complete structural pattern and an explicit language. Select relative paths, include and exclude globs, a finite result limit, and `text` or `json` output. The result envelope is bounded; that bound doesn't claim the native ast-grep traversal stops as soon as the envelope fills.
+Every tool advertises read-only, non-destructive, idempotent, closed-world MCP annotations.
 
-### `find_code_by_rule`
+| Tool | Purpose |
+| --- | --- |
+| `dump_syntax_tree` | Dumps `pattern`, `cst`, `ast`, or `sexp` syntax for a bounded snippet. |
+| `test_match_code_rule` | Tests validated inline YAML against a bounded snippet. |
+| `outline_code` | Outlines 1–64 explicit contained files with item, type, and public-member filters. |
+| `find_code` | Searches by pattern with optional selector, strictness, and preview-only rewrite. |
+| `find_code_by_rule` | Searches with validated inline rules and preserves fix-preview data. |
+| `scan_project_rules` | Runs only rules retained from startup configuration. |
+| `test_project_rules` | Runs retained configured suites without interaction or snapshot updates. |
+| `get_server_info` | Reports versions, configuration provenance, capabilities, coordinates, and limits. |
 
-Search with one or more inline YAML rules and the same path, glob, result-limit, and output controls. Set `include_metadata=true` to forward ast-grep's documented `--include-metadata` flag and retain each rule's metadata in structured matches. SARIF and GitHub output remain CLI-only workflows.
+### Pattern search and previews
 
-### `get_server_info`
+`find_code` requires `pattern` and `language`. Its optional controls are:
 
-Read the package version, resolved ast-grep identity, config, allowed roots, timeout, runtime result limits, and regex policy.
+- `selector`: selects a node kind from a contextual pattern;
+- `strictness`: `cst`, `smart`, `ast`, `relaxed`, `signature`, or `template`;
+- `rewrite`: returns replacement and replacement-offset previews without changing files.
 
-### `outline_code`
+An empty `rewrite` previews deletion. No tool invokes ast-grep rewrite application flags.
 
-Read per-file symbol hierarchies for 1 to 64 relative regular files. Directories, absolute paths, paths outside the project, and escaping symlinks are rejected. You can set an explicit language, choose `text` or `json`, and request a finite `max_results`.
+### Rule search
 
-The limit counts every emitted outline node recursively, including nested members. The response preserves each file's hierarchy and reports `returned`, `truncated`, and `limit`. ProjectSAST reads ast-grep's `--json=stream` output with these bounds:
+`find_code_by_rule` accepts one or more YAML rule documents. Match results preserve ast-grep rule fields, metadata, transformed metavariables, replacement text, replacement offsets, and future upstream fields. Text output renders the same preview information.
 
-- 1 MiB per newline-delimited JSON (NDJSON) record
-- 4 MiB across all records
-- The configured runtime result ceiling
+### Configured scan and test
 
-The adapter terminates and reaps ast-grep after it observes node `limit + 1`. Malformed, non-object, oversized, or incomplete records fail closed.
+`scan_project_rules` cannot accept arbitrary rule YAML. It uses only startup-retained rules. Optional `rule_ids` values are checked against the retained catalog and escaped into one exact-match filter. Paths and caller globs remain contained and bounded; rule-level `files` and `ignores` continue to use project-relative semantics.
 
-## Read search and outline results
+`test_project_rules` runs only startup-retained suites. Exit code 4 is reported as `passed: false`; configuration or execution exit codes fail the tool. It never passes `--interactive`, `--update-all`, or another snapshot mutation option.
 
-Text is the default model-facing format. JSON search results use this envelope:
+### Outline
+
+`outline_code` requires explicit relative regular files. It supports:
+
+- `items`: `auto`, `structure`, `exports`, `imports`, or `all`;
+- `symbol_types`: exact top-level outline symbol types;
+- `public_members`: retain only public members where the language outline defines visibility.
+
+The limit counts top-level items and nested members in preorder. Hierarchy and unknown fields are preserved.
+
+### Result envelopes and coordinates
+
+Search tools return:
 
 ```json
 {
@@ -108,21 +163,59 @@ Text is the default model-facing format. JSON search results use this envelope:
 }
 ```
 
-The server returns project-relative file paths and rejects results that resolve outside the selected project. Outline JSON uses the same result metadata with a per-file hierarchy instead of a flat `matches` list.
+Outline results use the same result metadata with a `files` hierarchy. Returned file paths are project-relative and revalidated after ast-grep exits.
+
+Coordinates follow ast-grep 0.45 conventions:
+
+- lines are zero-based;
+- columns are zero-based Unicode scalar counts;
+- byte offsets are zero-based UTF-8 byte offsets;
+- ranges are half-open `[start, end)`.
+
+## Deliberate exclusions
+
+Version 0.4.0 does not expose mutation, raw CLI arguments, `--follow`, ignore bypasses, snapshot updates, LSP, HTTP transport, or rewrite application.
+
+It also does not add `inspect_syntax`. Although `ast-grep-py==0.45.0` exists, it lacks the error, missing, extra, and child-field accessors required for a lossless concrete-syntax-tree contract. ProjectSAST does not parse debug stderr or add an independent grammar stack to approximate that contract.
 
 ## Develop and verify
 
-Install the locked environment and run the owner checks:
-
 ```bash
-uv sync --frozen --all-extras --dev
-uv run ruff check .
-uv run ruff format --check .
-uv run mypy main.py tests
-AST_GREP_TEST_EXECUTABLE=/absolute/path/to/ast-grep uv run pytest
+uv sync --locked --all-extras --dev --no-python-downloads
+uv run --no-sync python scripts/verify_environment.py
 uv lock --check
+uv run --no-sync ruff check .
+uv run --no-sync ruff format --check .
+uv run --no-sync mypy main.py config_snapshot.py scripts tests
+uv run --no-sync mypy --platform win32 main.py config_snapshot.py scripts tests
+uv run --no-sync pyright
+uv run --no-sync pyright --pythonplatform Windows
+uv run --no-sync pyright --pythonplatform Linux
+uv run --no-sync pytest tests/test_unit.py tests/test_config_snapshot.py tests/test_environment_policy.py \
+  --cov=main --cov=config_snapshot --cov-report=term-missing
+AST_GREP_TEST_EXECUTABLE=/absolute/path/to/ast-grep \
+  uv run --no-sync pytest tests/test_integration.py
+uv run --no-sync python scripts/launch_server.py --help
+uv run --no-sync python -m build --sdist --wheel --no-isolation
+uv run --no-sync twine check dist/*
+uv run --no-sync check-wheel-contents dist/*.whl
+uv run --no-sync python tests/package_smoke.py dist/sg_mcp-0.4.0-py3-none-any.whl dist/sg_mcp-0.4.0.tar.gz 0.4.0
 ```
 
-`AST_GREP_TEST_EXECUTABLE` is mandatory for integration acceptance. The suite executes its `--version` command and fails unless it reports exactly `ast-grep 0.45.0`. Protocol tests launch the installed `ast-grep-server` console entrypoint, negotiate both modern `mode="auto"` and handshake-era `mode="legacy"` MCP connections, inspect the six-tool catalog, and exercise representative calls.
+Unit coverage is enforced at 84%. Integration acceptance requires an explicit executable reporting exactly ast-grep 0.45.0 and negotiates both modern `mode="auto"` and handshake-era `mode="legacy"` MCP connections.
 
-For rule design, use ast-grep's [AI prompting workflow](https://astgrep.com/advanced/prompting.html), [rule testing guidance](https://astgrep.com/guide/test-rule.html), and [rewriting guide](https://astgrep.com/guide/rewrite-code.html). Rewriting and exhaustive project workflows remain outside this MCP server.
+Those commands describe one platform. Acceptance runs on Linux, macOS, and Windows, and path traversal, permissions, and process teardown behave differently on each: inode numbers are reused on Linux and unstable on Windows, and `chmod` sets only the read-only flag on Windows. Type-check the other platforms with `mypy --platform` and `pyright --pythonplatform`, and run the affected tests on Linux in a container before pushing. `AGENTS.md` carries the container command and the assertions that do not hold everywhere.
+
+Distribution verification stays in the repository-owned locked environment: tool execution disables synchronization, builds disable PEP 517 isolation, the wheel is imported directly from its archive, and the sdist is inspected without extraction or installation.
+
+`AGENTS.md` defines the repository execution boundary. `scripts/verify_environment.py` fails unless verification runs from the repository root in its `.venv`, and it rejects alternate, isolated, cached, and external environment commands in verification surfaces. `scripts/launch_server.py` checks the lock and synchronized environment without updating either before starting stdio. CI fixes `UV_PROJECT_ENVIRONMENT` to `.venv`, synchronizes once with `--locked`, and runs every subsequent tool with `--no-sync`.
+
+## Release boundary
+
+The release workflow accepts protected `v*` tags, verifies the tag is exactly `v<project.version>`, reruns three-platform acceptance against ast-grep 0.45.0, builds and checks the sdist and pure Python wheel, and publishes through PyPI trusted publishing only from the protected `pypi` environment.
+
+Creating commits or tags, pushing, configuring the GitHub environment, and enabling PyPI trusted publishing remain operator actions.
+
+## Rule-authoring guidance
+
+[`ast-grep.mdc`](ast-grep.mdc) records the official ast-grep agent-skill workflow and rule reference used by this repository. Repository working agreements remain authoritative over generic upstream guidance.

@@ -1,276 +1,309 @@
 ---
-description:
+description: Write, test, and run ast-grep structural-search rules with ProjectSAST
 globs:
 alwaysApply: false
 ---
 
-# use ast-grep to search code
+# ast-grep structural search
 
-Your task is to help users to write ast-grep rules to search code.
-User will query you by natural language, and you will write ast-grep rules to search code.
+Use this guidance to translate a natural-language code query into an ast-grep pattern or YAML rule, test it against representative snippets, inspect syntax when needed, and search the intended contained project scope.
 
-You need to translate user's query into ast-grep rules.
-And use ast-grep-mcp to develop a rule, test the rule and then search the codebase.
+## Provenance and authority
 
-## General Process
+This file synchronizes the official [ast-grep agent skill](https://github.com/ast-grep/agent-skill) and its rule reference at revision `c2a9bc154f4ffe08b25d28d5e852dfac8c0d0d8a`, retrieved 2026-08-03.
 
-1. Clearly understand the user's query. Clarify any ambiguities and if needed, ask user for more details.
-2. Write a simple example code snippet that matches the user's query.
-3. Write an ast-grep rule that matches the example code snippet.
-4. Test the rule against the example code snippet to ensure it matches. Use ast-grep mcp tool `test_match_code_rule` to verify the rule.
-  a. if the rule does not match, revise the rule by removing some sub rules and debugging unmatching parts.
-  b. if you are using `inside` or `has` relational rules, ensure to use `stopBy: end` to ensure the search goes to the end of the direction.
-5. Use the ast-grep mcp tool to search code using the rule.
+Repository `AGENTS.md` instructions and working agreements are authoritative. In particular, inspect files, run tools, probe the installed ast-grep 0.45.0 binary, and resolve discoverable facts before presenting a result. Do not ask a user for information that repository or tool inspection can determine.
 
-## Tips for Writing Rules
+ProjectSAST is read-only. Rewrites and rule fixes may be previewed, but no MCP tool applies them.
 
-0. always use `stopBy: end` for relational rules to ensure the search goes to the end of the direction.
+## Workflow
+
+1. Determine the target language, code structure, intended scope, and inclusions or exclusions from repository evidence and the request.
+2. Create minimal positive and negative snippets that cover the requested behavior.
+3. Start with the simplest structural pattern or rule that can express the query.
+4. Use `dump_syntax_tree` to inspect `cst`, `ast`, `pattern`, or `sexp` output when node kinds or pattern parsing are uncertain.
+5. Use `test_match_code_rule` to validate a YAML rule against the snippets.
+6. Simplify a failing rule, verify each part, and then rebuild composite or relational constraints.
+7. Search with `find_code` for a pattern or `find_code_by_rule` for inline YAML.
+8. Use `scan_project_rules` only for rules retained from the startup configuration.
+9. Verify representative returned matches and report the actual bounded result envelope.
+
+Use `outline_code` before a broad search when repository structure or symbol names are unknown. Use `get_server_info` when the effective roots, configuration, capabilities, coordinate conventions, or limits matter.
+
+## Choosing an interface
+
+| Need | Tool |
+| --- | --- |
+| Inspect parser structure or a parsed pattern | `dump_syntax_tree` |
+| Test an inline YAML rule against a snippet | `test_match_code_rule` |
+| Discover symbols in explicit files | `outline_code` |
+| Search with one structural pattern | `find_code` |
+| Search with one or more inline YAML rules | `find_code_by_rule` |
+| Run startup-retained project rules | `scan_project_rules` |
+| Run startup-retained rule tests | `test_project_rules` |
+| Inspect the effective server contract | `get_server_info` |
+
+Use `find_code` for a direct single-node pattern. Use `find_code_by_rule` when the query needs relational rules, composite logic, constraints, transformations, metadata, or a rule-level fix preview.
+
+## Rule document
+
+A searchable YAML rule normally has this shape:
 
 ```yaml
-has:
-  pattern: await $EXPR
-  stopBy: end
+id: async-with-await
+language: JavaScript
+severity: info
+message: async function containing await
+rule:
+  kind: function_declaration
+  has:
+    pattern: await $EXPR
+    stopBy: end
 ```
 
-1. if relational rules are used but no match is found, try adding `stopBy: end` to the relational rule to ensure it searches to the end of the direction.
-2. use pattern only if the code structure is simple and does not require complex matching (e.g. matching function calls, variable names, etc.).
-3. use rule if the code structure is complex and can be broken down into smaller parts (e.g. find call inside certain function).
-4. if pattern is not working, try using `kind` to match the node type first, then use `has` or `inside` to match the code structure.
+Fields in the `rule` object are implicitly combined with logical AND. At least one positive matcher such as `pattern`, `kind`, or a positive composite rule is required. Use an explicit ordered `all` when a later sub-rule depends on metavariables captured by an earlier sub-rule.
 
-## Rule Development Process
-1. Break down the user's query into smaller parts.
-2. Identify sub rules that can be used to match the code.
-3. Combine the sub rules into a single rule using relational rules or composite rules.
-4. if rule does not match example code, revise the rule by removing some sub rules and debugging unmatching parts.
-5. Use ast-grep mcp tool to dump AST or dump pattern query
-6. Use ast-grep mcp tool to test the rule against the example code snippet.
+## Atomic rules
 
-## ast-grep mcp tool usage
+| Property | Purpose | Example |
+| --- | --- | --- |
+| `pattern` | Match code structure | `pattern: console.log($ARG)` |
+| `kind` | Match a tree-sitter node kind | `kind: call_expression` |
+| `regex` | Match the full node text with Rust regex | `regex: ^[a-z]+$` |
+| `nthChild` | Match a 1-based sibling position | `nthChild: 1` |
+| `range` | Match a zero-based, half-open source range | `range: {start: {line: 0, column: 0}, end: {line: 0, column: 10}}` |
 
-ast-grep mcp has several tools:
-- dump_syntax_tree will dump the AST of the code, this is useful for debugging and understanding the code structure and patterns
-- test_match_code_rule will test a rule agains a code snippet, this is useful to ensure the rule matches the code
+### Pattern forms
 
-## Rule Format
+A string pattern directly represents the target structure:
 
-# ast-grep Rule Documentation for Claude Code
+```yaml
+pattern: console.log($ARG)
+```
 
-## 1. Introduction to ast-grep Rules
+Use an object pattern when parsing requires surrounding context or a selected node:
 
-ast-grep rules are declarative specifications for matching and filtering Abstract Syntax Tree (AST) nodes. They enable structural code search and analysis by defining conditions an AST node must meet to be matched.
+```yaml
+pattern:
+  context: class Example { $FIELD }
+  selector: field_definition
+  strictness: smart
+```
 
-### 1.1 Overview of Rule Categories
+Supported strictness values are `cst`, `smart`, `ast`, `relaxed`, `signature`, and `template`. The default is `smart`.
 
-ast-grep rules are categorized into three types for modularity and comprehensive definition :
-*   **Atomic Rules**: Match individual AST nodes based on intrinsic properties like code patterns (`pattern`), node type (`kind`), or text content (`regex`).
-*   **Relational Rules**: Define conditions based on a target node's position or relationship to other nodes (e.g., `inside`, `has`, `precedes`, `follows`).
-*   **Composite Rules**: Combine other rules using logical operations (AND, OR, NOT) to form complex matching criteria (e.g., `all`, `any`, `not`, `matches`).
+### Node kind
 
-## 2. Anatomy of an ast-grep Rule Object
+`kind` uses the language grammar's tree-sitter node name. Confirm uncertain kinds with `dump_syntax_tree` rather than guessing.
 
-The ast-grep rule object is the core configuration unit defining how ast-grep identifies and filters AST nodes. It's typically a YAML.
+```yaml
+kind: function_declaration
+```
 
-### 2.1 General Structure and Optionality
+### Text regex
 
-Every field within an ast-grep Rule Object is optional, but at least one "positive" key (e.g., `kind`, `pattern`) must be present.
+`regex` is applied to the entire matched node text and uses Rust regular-expression syntax. It is not a structural positive matcher by itself. Respect the runtime `forbid_regex_rules` capability reported by `get_server_info`.
 
-A node matches a rule if it satisfies all fields defined within that rule object, implying an implicit logical AND operation.
+### Child position
 
-For rules using metavariables that depend on prior matching, explicit `all` composite rules are recommended to guarantee execution order.
+`nthChild` counts named children from one by default. It accepts an integer, an `An+B` expression such as `2n+1`, or an object with `position`, `reverse`, and `ofRule`.
 
-**Table 1: ast-grep Rule Object Properties Overview**
+### Source range
 
-| Property | Type | Category | Purpose | Example |
-| :--- | :--- | :--- | :--- | :--- |
-| `pattern` | String or Object | Atomic | Matches AST node by code pattern. | `pattern: console.log($ARG)` |
-| `kind` | String | Atomic | Matches AST node by its kind name. | `kind: call_expression` |
-| `regex` | String | Atomic | Matches node's text by Rust regex. | `regex: ^[a-z]+$` |
-| `nthChild` | number, string, Object | Atomic | Matches nodes by their index within parent's children. | `nthChild: 1` |
-| `range` | RangeObject | Atomic | Matches node by character-based start/end positions. | `range: { start: { line: 0, column: 0 }, end: { line: 0, column: 10 } }` |
-| `inside` | Object | Relational | Target node must be inside node matching sub-rule. | `inside: { pattern: class $C { $$$ }, stopBy: end }` |
-| `has` | Object | Relational | Target node must have descendant matching sub-rule. | `has: { pattern: await $EXPR, stopBy: end }` |
-| `precedes` | Object | Relational | Target node must appear before node matching sub-rule. | `precedes: { pattern: return $VAL }` |
-| `follows` | Object | Relational | Target node must appear after node matching sub-rule. | `follows: { pattern: import $M from '$P' }` |
-| `all` | Array<Rule> | Composite | Matches if all sub-rules match. | `all: [ { kind: call_expression }, { pattern: foo($A) } ]` |
-| `any` | Array<Rule> | Composite | Matches if any sub-rules match. | `any: [ { pattern: foo() }, { pattern: bar() } ]` |
-| `not` | Object | Composite | Matches if sub-rule does not match. | `not: { pattern: console.log($ARG) }` |
-| `matches` | String | Composite | Matches if predefined utility rule matches. | `matches: my-utility-rule-id` |
+`range` contains `start` and `end` positions. Lines and columns are zero-based, the start is inclusive, and the end is exclusive.
 
-## 3. Atomic Rules: Fundamental Matching Building Blocks
+## Relational rules
 
-Atomic rules match individual AST nodes based on their intrinsic properties.
+Relational rules constrain a target by surrounding syntax.
 
-### 3.1 `pattern`: String and Object Forms
+| Property | Relationship |
+| --- | --- |
+| `inside` | Target has a matching ancestor |
+| `has` | Target has a matching descendant |
+| `precedes` | Target appears before a matching node |
+| `follows` | Target appears after a matching node |
 
-The `pattern` rule matches a single AST node based on a code pattern.
-*   **String Pattern**: Directly matches using ast-grep's pattern syntax with metavariables.
-    *   Example: `pattern: console.log($ARG)`
-*   **Object Pattern**: Offers granular control for ambiguous patterns or specific contexts.
-    *   `selector`: Pinpoints a specific part of the parsed pattern to match.
-        ```yaml
-        pattern:
-          selector: field_definition
-          context: class { $F }
-        ```
+Use `stopBy: end` for a deep search through the full relevant direction:
 
-    *   `context`: Provides surrounding code context for correct parsing.
-    *   `strictness`: Modifies the pattern's matching algorithm (`cst`, `smart`, `ast`, `relaxed`, `signature`).
-        ```yaml
-        pattern:
-          context: foo($BAR)
-          strictness: relaxed
-        ```
+```yaml
+rule:
+  kind: function_declaration
+  has:
+    pattern: await $EXPR
+    stopBy: end
+```
 
+The default `stopBy: neighbor` inspects only the immediate surrounding node. `stopBy` may instead contain a rule that terminates traversal when it matches. `inside` and `has` also accept `field`; `precedes` and `follows` do not.
 
-### 3.2 `kind`: Matching by Node Type
+```yaml
+rule:
+  pattern: console.log($$$ARGS)
+  inside:
+    kind: method_definition
+    stopBy: end
+```
 
-The `kind` rule matches an AST node by its `tree_sitter_node_kind` name, derived from the language's Tree-sitter grammar. Useful for targeting constructs like `call_expression` or `function_declaration`.
-*   Example: `kind: call_expression`
+## Composite rules
 
-### 3.3 `regex`: Text-Based Node Matching
+### Conjunction
 
-The `regex` rule matches the entire text content of an AST node using a Rust regular expression. It's not a "positive" rule, meaning it matches any node whose text satisfies the regex, regardless of its structural kind.
+`all` matches when every sub-rule matches and preserves evaluation order:
 
-### 3.4 `nthChild`: Positional Node Matching
-
-The `nthChild` rule finds nodes by their 1-based index within their parent's children list, counting only named nodes by default.
-*   `number`: Matches the exact nth child. Example: `nthChild: 1`
-*   `string`: Matches positions using An+B formula. Example: `2n+1`
-*   `Object`: Provides granular control:
-    *   `position`: `number` or An+B string.
-    *   `reverse`: `true` to count from the end.
-    *   `ofRule`: An ast-grep rule to filter the sibling list before counting.
-
-### 3.5 `range`: Position-Based Node Matching
-
-The `range` rule matches an AST node based on its character-based start and end positions. A `RangeObject` defines `start` and `end` fields, each with 0-based `line` and `column`. `start` is inclusive, `end` is exclusive.
-
-## 4. Relational Rules: Contextual and Hierarchical Matching
-
-Relational rules filter targets based on their position relative to other AST nodes. They can include `stopBy` and `field` options.
-
-****
-
-### 4.1 `inside`: Matching Within a Parent Node
-
-Requires the target node to be inside another node matching the `inside` sub-rule.
-*   Example:
-
-    ```yaml
-        inside:
-            pattern: class $C { $$$ }
-            stopBy: end
-    ```
-
-### 4.2 `has`: Matching with a Descendant Node
-
-Requires the target node to have a descendant node matching the `has` sub-rule.
-*   Example:
-    ```yaml
-    has:
+```yaml
+rule:
+  all:
+    - kind: function_declaration
+    - has:
         pattern: await $EXPR
         stopBy: end
-    ```
+```
 
-### 4.3 `precedes` and `follows`: Sequential Node Matching
+### Alternatives
 
-*   `precedes`: Target node must appear before a node matching the `precedes` sub-rule.
-*   `follows`: Target node must appear after a node matching the `follows` sub-rule.
+`any` matches when one sub-rule matches:
 
-Both include `stopBy` but not `field`.
+```yaml
+rule:
+  any:
+    - pattern: console.log($$$ARGS)
+    - pattern: console.warn($$$ARGS)
+    - pattern: console.error($$$ARGS)
+```
 
-### 4.4 `stopBy` and `field`: Refining Relational Searches
+### Negation
 
-*   `stopBy`: Controls search termination for relational rules.
-    *   `"neighbor"` (default): Stops when immediate surrounding node doesn't match.
-    *   `"end"`: Searches to the end of the direction (root for `inside`, leaf for `has`).
-    *   `Rule object`: Stops when a surrounding node matches the provided rule (inclusive).
-*   `field`: Specifies a sub-node within the target node that should match the relational rule. Only for `inside` and `has`.
+`not` excludes a matching sub-rule:
 
-When you are not sure, always use `stopBy: end` to ensure the search goes to the end of the direction.
+```yaml
+rule:
+  all:
+    - kind: function_declaration
+    - has:
+        pattern: await $EXPR
+        stopBy: end
+    - not:
+        has:
+          pattern: try { $$$BODY } catch ($ERROR) { $$$HANDLER }
+          stopBy: end
+```
 
-## 5. Composite Rules: Logical Combination of Conditions
+### Utility rules
 
-Composite rules combine atomic and relational rules using logical operations.
+`matches` invokes a utility rule retained by an ast-grep configuration:
 
-### 5.1 `all`: Conjunction (AND) of Rules
+```yaml
+rule:
+  matches: my-utility-rule-id
+```
 
-Matches a node only if all sub-rules in the list match. Guarantees order of rule matching, important for metavariables.
-*   Example:
-    ```yaml
-    all:
-     - kind: call_expression
-     - pattern: console.log($ARG)
-    ```
+Inline rules can use only utility rules made available by the effective inline configuration. Inspect `get_server_info` rather than assuming a mutable source configuration is active.
 
+## Metavariables
 
-### 5.2 `any`: Disjunction (OR) of Rules
+| Form | Meaning |
+| --- | --- |
+| `$VAR` | One named node, captured |
+| `$$VAR` | One unnamed node, captured |
+| `$$$VAR` | Zero or more nodes, captured non-greedily |
+| `$_VAR` | One named node, not captured |
 
-Matches a node if any sub-rules in the list match.
-*   Example:
-    ```yaml
-    any:
-     - pattern: console.log($ARG)
-     - pattern: console.warn($ARG)
-     - pattern: console.error($ARG)
-    ```
+Metavariable names use uppercase letters, digits, and underscores. `$META`, `$META_VAR`, and `$_` are valid; `$lower`, `$123`, and `$KEBAB-CASE` are not. A metavariable must occupy an entire AST node. Forms such as `obj.on$EVENT`, `"Hello $WORLD"`, and `a $OP b` are ordinary source text rather than metavariable patterns.
 
+Repeated capturing metavariables require structural equality:
 
-### 5.3 `not`: Negation (NOT) of a Rule
+```yaml
+pattern: $LEFT == $LEFT
+```
 
-Matches a node if the single sub-rule does not match.
-*   Example:
-    ```yaml
-    not:
-     pattern: console.log($ARG)
-    ```
+Use a double-dollar metavariable for unnamed nodes such as operators:
 
+```yaml
+rule:
+  kind: binary_expression
+  has:
+    field: operator
+    pattern: $$OPERATOR
+```
 
-### 5.4 `matches`: Rule Reuse and Utility Rules
+Use a triple-dollar metavariable for sequences:
 
-Takes a rule-id string, matching if the referenced utility rule matches. Enables rule reuse and recursive rules.
+```yaml
+pattern: function $NAME($$$PARAMS) { $$$BODY }
+```
 
-## 6. Metavariables: Dynamic Content Matching
+## Debugging rules
 
-Metavariables are placeholders in patterns to match dynamic content in the AST.
+When a rule does not match:
 
-### 6.1 `$VAR`: Single Named Node Capture
+1. Confirm the language and inspect the target with `dump_syntax_tree`.
+2. Replace a complex pattern with its expected `kind`.
+3. Test the atomic target matcher by itself.
+4. Add relational constraints one at a time.
+5. Use `stopBy: end` when the intended relationship is not immediate.
+6. Add composite constraints one at a time.
+7. Confirm each metavariable occupies a complete node.
+8. Test both positive and negative snippets.
 
-Captures a single named node in the AST.
-*   **Valid**: `$META`, `$META_VAR`, `$_`
-*   **Invalid**: `$invalid`, `$123`, `$KEBAB-CASE`
-*   **Example**: `console.log($GREETING)` matches `console.log('Hello World')`.
-*   **Reuse**: `$A == $A` matches `a == a` but not `a == b`.
+Do not infer correctness from a single positive match. A useful rule must also reject near misses that represent the requested exclusions.
 
-### 6.2 `$$VAR`: Single Unnamed Node Capture
+## Read-only previews
 
-Captures a single unnamed node (e.g., operators, punctuation).
-*   **Example**: To match the operator in `a + b`, use `$$OP`.
-    ```yaml
-    rule:
-      kind: binary_expression
-      has:
-        field: operator
-        pattern: $$OP
-    ```
+`find_code` accepts an optional `rewrite`. `find_code_by_rule` preserves configured `fix`, transformation, rewriter, replacement, and replacement-offset data. An empty replacement previews deletion. Treat all such data as proposals: ProjectSAST never writes source files.
 
+## Configured rules and tests
 
-### 6.3 `$$$MULTI_META_VARIABLE`: Multi-Node Capture
+`scan_project_rules` runs only exact rule IDs retained in the immutable startup snapshot. Rule IDs, search paths, and globs are validated and bounded. `test_project_rules` runs only retained test suites and never updates snapshots or enters an interactive mode.
 
-Matches zero or more AST nodes (non-greedy). Useful for variable numbers of arguments or statements.
-*   **Example**: `console.log($$$)` matches `console.log()`, `console.log('hello')`, and `console.log('debug:', key, value)`.
-*   **Example**: `function $FUNC($$$ARGS) { $$$ }` matches functions with varying parameters/statements.
+Do not replace these tools with raw ast-grep arguments. The MCP surface intentionally excludes arbitrary CLI flags, mutation, ignore bypasses, and configuration reloads.
 
-### 6.4 Non-Capturing Metavariables (`_VAR`)
+## Result interpretation
 
-Metavariables starting with an underscore (`_`) are not captured. They can match different content even if named identically, optimizing performance.
-*   **Example**: `$_FUNC($_FUNC)` matches `test(a)` and `testFunc(1 + 1)`.
+Search responses contain bounded `matches`, `returned`, `truncated`, and `limit` fields. A truncated response proves only that more than the requested limit was observed. File paths are project-relative. Lines and columns are zero-based; UTF-8 byte offsets are zero-based; ranges are half-open.
 
-### 6.5 Important Considerations for Metavariable Detection
+Unknown upstream fields are retained in structured results. Preserve them when they carry metadata or preview information rather than narrowing a result to only familiar fields.
 
-*   **Syntax Matching**: Only exact metavariable syntax (e.g., `$A`, `$$B`, `$$$C`) is recognized.
-*   **Exclusive Content**: Metavariable text must be the only text within an AST node.
-*   **Non-working**: `obj.on$EVENT`, `"Hello $WORLD"`, `a $OP b`, `$jq`.
+## Reference examples
 
-The ast-grep playground is useful for debugging patterns and visualizing metavariables.
+Find console calls inside class methods:
 
+```yaml
+id: console-in-class-method
+language: JavaScript
+severity: info
+message: console call in class method
+rule:
+  pattern: console.$METHOD($$$ARGS)
+  inside:
+    kind: method_definition
+    stopBy: end
+```
+
+Find functions that await but lack a try statement:
+
+```yaml
+id: await-without-try
+language: JavaScript
+severity: warning
+message: await without local try statement
+rule:
+  all:
+    - kind: function_declaration
+    - has:
+        pattern: await $EXPR
+        stopBy: end
+    - not:
+        has:
+          kind: try_statement
+          stopBy: end
+```
+
+Find calls with one or more arguments:
+
+```yaml
+id: nonempty-call
+language: TypeScript
+severity: info
+message: call with arguments
+rule:
+  pattern: $CALLEE($FIRST, $$$REST)
+```

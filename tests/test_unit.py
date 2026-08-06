@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import socket
 import struct
@@ -10,22 +9,32 @@ import subprocess
 import sys
 import time
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
+import yaml
 
+from config_snapshot import ConfigSnapshot
 from main import (
-    MAX_OUTLINE_AGGREGATE_BYTES,
+    MAX_NATIVE_LIBRARY_BYTES,
+    MAX_NDJSON_RECORD_BYTES,
     MAX_OUTLINE_PATHS,
     MAX_OUTLINE_RECORD_BYTES,
+    MAX_SNIPPET_INPUT_BYTES,
+    MAX_STRUCTURED_OUTPUT_BYTES,
+    MAX_SUBPROCESS_DIAGNOSTIC_BYTES,
+    MAX_TEST_REPORT_BYTES,
     POSIX_ARG_HEADROOM_BYTES,
+    PROCESS_TERMINATION_GRACE_SECONDS,
     SUPPORTED_AST_GREP_VERSION,
     WINDOWS_CREATE_PROCESS_LIMIT,
     AstGrepService,
     OutlineResults,
     ResolvedExecutable,
     ServerRuntime,
+    _parse_match_record,
     _requires_node,
     build_argument_parser,
     build_runtime,
@@ -36,8 +45,11 @@ from main import (
     parse_stream_matches,
     resolve_ast_grep_executable,
     run_mcp_server,
+    run_ndjson_process,
     run_outline_process,
     run_process,
+    run_text_process,
+    validate_match_document,
     validate_process_budget,
     validate_rule_yaml,
 )
@@ -73,6 +85,78 @@ def file_stdout_command(payload_path: Path) -> list[str]:
         "import pathlib, sys; sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes())",
         str(payload_path),
     ]
+
+
+def canonical_outline_item(name: str) -> dict[str, Any]:
+    return {
+        "role": "item",
+        "symbolType": "function",
+        "name": name,
+        "signature": f"def {name}():",
+        "range": {
+            "byteOffset": {"start": 0, "end": len(name.encode("utf-8"))},
+            "start": {"line": 0, "column": 0},
+            "end": {"line": 0, "column": len(name)},
+        },
+        "astKind": "function_definition",
+        "isImport": False,
+        "isExported": False,
+    }
+
+
+def source_range(text: str, *, start_offset: int = 0, start_column: int = 0) -> dict[str, Any]:
+    byte_length = len(text.encode("utf-8"))
+    return {
+        "byteOffset": {"start": start_offset, "end": start_offset + byte_length},
+        "start": {"line": 0, "column": start_column},
+        "end": {"line": 0, "column": start_column + len(text)},
+    }
+
+
+def canonical_match(*, file: str = "a.py", text: str = "print(1)") -> dict[str, Any]:
+    return {
+        "text": text,
+        "range": source_range(text),
+        "file": file,
+        "lines": text,
+        "charCount": {"leading": 0, "trailing": 0},
+        "language": "Python",
+        "metaVariables": {"single": {}, "multi": {}, "transformed": {}},
+        "ruleId": "test-rule",
+        "severity": "warning",
+        "note": None,
+        "message": "test message",
+        "labels": [{"text": text, "range": source_range(text), "style": "primary"}],
+    }
+
+
+def fake_config_snapshot(root: Path) -> ConfigSnapshot:
+    bundle = root / "private-config"
+    bundle.mkdir()
+    paths = []
+    for name in ("inline-sgconfig.yml", "project-sgconfig.yml", "test-sgconfig.yml"):
+        path = bundle / name
+        path.write_text("ruleDirs: []\n", encoding="utf-8")
+        paths.append(path)
+    return ConfigSnapshot(
+        source_path=root / "sgconfig.yml",
+        bundle_root=bundle,
+        inline_config_path=paths[0],
+        project_config_path=paths[1],
+        test_config_path=paths[2],
+        digest="a" * 64,
+        provenance={"source": str(root / "sgconfig.yml"), "snapshot": "private-read-only"},
+        configured_rule_ids=("configured-print", "literal.dot+id"),
+        capabilities={
+            "inline_search": True,
+            "outline": True,
+            "configured_scan": True,
+            "configured_tests": True,
+            "custom_languages": False,
+        },
+        native_library_hashes={},
+        runtime_root=root,
+    )
 
 
 def descendant_listener_program() -> str:
@@ -157,6 +241,58 @@ def test_build_runtime_resolves_config_roots_and_version(tmp_path: Path) -> None
     assert runtime.forbid_regex_rules is True
 
 
+def test_build_runtime_validates_configured_tests_before_returning(tmp_path: Path) -> None:
+    executable = tmp_path / "ast-grep"
+    executable.write_text("test executable", encoding="utf-8")
+    executable.chmod(0o755)
+    tests = tmp_path / "rule-tests"
+    tests.mkdir()
+    config = tmp_path / "sgconfig.yml"
+    config.write_text("testConfigs:\n  - testDir: rule-tests\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def successful_runner(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(arguments)
+        stdout = f"ast-grep {SUPPORTED_AST_GREP_VERSION}\n" if arguments[-1] == "--version" else ""
+        return subprocess.CompletedProcess(arguments, 0, stdout, "")
+
+    runtime = build_runtime(
+        working_directory=tmp_path,
+        ast_grep_executable=str(executable),
+        config_path="sgconfig.yml",
+        runner=successful_runner,
+    )
+
+    assert [command[1] for command in calls[1:]] == ["scan", "test"]
+    runtime.close()
+    assert not (tmp_path / ".project-sast-runtime").exists()
+
+
+def test_build_runtime_removes_snapshot_when_startup_validation_fails(tmp_path: Path) -> None:
+    executable = tmp_path / "ast-grep"
+    executable.write_text("test executable", encoding="utf-8")
+    executable.chmod(0o755)
+    config = tmp_path / "sgconfig.yml"
+    config.write_text("ruleDirs: []\n", encoding="utf-8")
+    calls = 0
+
+    def failing_runner(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return subprocess.CompletedProcess(arguments, 0, f"ast-grep {SUPPORTED_AST_GREP_VERSION}\n", "")
+        return subprocess.CompletedProcess(arguments, 3, "", "invalid configured rule")
+
+    with pytest.raises(RuntimeError, match="exit code 3"):
+        build_runtime(
+            working_directory=tmp_path,
+            ast_grep_executable=str(executable),
+            config_path="sgconfig.yml",
+            runner=failing_runner,
+        )
+    assert not (tmp_path / ".project-sast-runtime").exists()
+
+
 def test_build_runtime_rejects_missing_executable(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="does not exist"):
         build_runtime(
@@ -166,11 +302,12 @@ def test_build_runtime_rejects_missing_executable(tmp_path: Path) -> None:
 
 
 def test_build_runtime_rejects_wrong_executable(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="is not ast-grep"):
+    with pytest.raises(ValueError) as error:
         build_runtime(
             working_directory=tmp_path,
             ast_grep_executable=sys.executable,
         )
+    assert "must report exactly 'ast-grep 0.45.0'" in str(error.value)
 
 
 def test_build_runtime_rejects_ast_grep_version_drift(tmp_path: Path) -> None:
@@ -179,16 +316,15 @@ def test_build_runtime_rejects_ast_grep_version_drift(tmp_path: Path) -> None:
     executable.chmod(0o755)
 
     def drifted_version_runner(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        # A version that can never be the supported one, so this stays a drift test
-        # whatever SUPPORTED_AST_GREP_VERSION becomes.
         return subprocess.CompletedProcess(arguments, 0, "ast-grep 0.0.0\n", "")
 
-    with pytest.raises(ValueError, match=f"expected {re.escape(SUPPORTED_AST_GREP_VERSION)}"):
+    with pytest.raises(ValueError) as error:
         build_runtime(
             working_directory=tmp_path,
             ast_grep_executable=str(executable),
             runner=drifted_version_runner,
         )
+    assert "must report exactly 'ast-grep 0.45.0'" in str(error.value)
 
 
 def test_build_runtime_rejects_config_outside_allowed_root(tmp_path: Path) -> None:
@@ -230,6 +366,29 @@ def test_build_runtime_rejects_invalid_limits(tmp_path: Path, default_limit: int
             ast_grep_executable=str(executable),
             default_max_results=default_limit,
             max_results_cap=cap,
+            runner=version_runner,
+        )
+
+
+@pytest.mark.parametrize(
+    "timeout",
+    [
+        pytest.param(0.0, id="zero"),
+        pytest.param(-1.0, id="negative"),
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(float("inf"), id="infinity"),
+    ],
+)
+def test_build_runtime_rejects_nonfinite_or_nonpositive_timeout(tmp_path: Path, timeout: float) -> None:
+    executable = tmp_path / "ast-grep"
+    executable.write_text("test executable", encoding="utf-8")
+    executable.chmod(0o755)
+
+    with pytest.raises(ValueError, match="finite and greater than zero"):
+        build_runtime(
+            working_directory=tmp_path,
+            ast_grep_executable=str(executable),
+            command_timeout_seconds=timeout,
             runner=version_runner,
         )
 
@@ -293,7 +452,6 @@ def test_argument_parser_rejects_removed_transport_surface(
         build_argument_parser().parse_args(arguments)
 
     assert error.value.code == 2
-    # One read only: capsys.readouterr() drains the buffer.
     stderr = capsys.readouterr().err
     assert "unrecognized arguments" in stderr
 
@@ -375,6 +533,49 @@ def test_resolve_ast_grep_executable_runs_native_npm_target_directly(tmp_path: P
     assert resolved.command_prefix == (str(target),)
 
 
+def test_resolve_ast_grep_executable_uses_matching_optional_native_package(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package_name = "@ast-grep/cli-test-platform"
+    version = "0.45.0"
+    package = tmp_path / "node_modules" / "@ast-grep" / "cli"
+    package.mkdir(parents=True)
+    launcher = package / "ast-grep.js"
+    launcher.write_text("console.log('ast-grep')\n", encoding="utf-8")
+    (package / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "@ast-grep/cli",
+                "version": version,
+                "bin": "ast-grep.js",
+                "optionalDependencies": {package_name: version},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    native_package = package.parent / "cli-test-platform"
+    native_package.mkdir()
+    (native_package / "package.json").write_text(
+        json.dumps({"name": package_name, "version": version}),
+        encoding="utf-8",
+    )
+    native_executable = native_package / ("ast-grep.exe" if os.name == "nt" else "ast-grep")
+    native_executable.write_bytes(b"native executable")
+    native_executable.chmod(0o755)
+
+    shim = tmp_path / "node_modules" / ".bin" / "ast-grep"
+    shim.parent.mkdir(parents=True)
+    shim.write_text("shim", encoding="utf-8")
+    monkeypatch.setattr("main._native_ast_grep_package_name", lambda: package_name)
+
+    resolved = resolve_ast_grep_executable(str(shim), working_directory=tmp_path)
+
+    assert resolved.path == native_executable
+    assert resolved.command_prefix == (str(native_executable),)
+
+
 @pytest.mark.parametrize("suffix", [".bat", ".cmd"])
 def test_resolve_ast_grep_executable_rejects_arbitrary_batch_files(tmp_path: Path, suffix: str) -> None:
     launcher = tmp_path / f"ast-grep{suffix}"
@@ -386,7 +587,6 @@ def test_resolve_ast_grep_executable_rejects_arbitrary_batch_files(tmp_path: Pat
 
 
 def test_windows_complete_command_budget_accepts_boundary_and_rejects_one_more_character() -> None:
-    # `x <argument>\0` is three UTF-16 code units beyond the argument itself.
     boundary_argument = "a" * (WINDOWS_CREATE_PROCESS_LIMIT - 3)
 
     validate_process_budget(["x", boundary_argument], environment={}, platform_name="nt")
@@ -396,7 +596,6 @@ def test_windows_complete_command_budget_accepts_boundary_and_rejects_one_more_c
 
 
 def test_windows_environment_block_budget_accepts_boundary_and_rejects_one_more_character() -> None:
-    # The environment block is `K=<value>\0\0`, four UTF-16 units beyond the value.
     boundary_value = "a" * (WINDOWS_CREATE_PROCESS_LIMIT - 4)
 
     validate_process_budget(["x"], environment={"K": boundary_value}, platform_name="nt")
@@ -444,6 +643,33 @@ def test_process_budget_rejects_batch_commands_on_every_platform(command: list[s
         validate_process_budget(command, environment={}, platform_name="nt")
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param([object()], id="non-string"),
+        pytest.param(["tool\0"], id="nul"),
+    ],
+)
+def test_process_budget_rejects_invalid_runtime_command_values(command: list[Any]) -> None:
+    with pytest.raises(ValueError, match="Command arguments must be strings without NUL characters"):
+        validate_process_budget(command, environment={}, platform_name="nt")
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        pytest.param({1: "value"}, id="non-string-name"),
+        pytest.param({"KEY": object()}, id="non-string-value"),
+        pytest.param({"BAD\0KEY": "value"}, id="nul-name"),
+        pytest.param({"KEY": "bad\0value"}, id="nul-value"),
+        pytest.param({"BAD=KEY": "value"}, id="equals-in-name"),
+    ],
+)
+def test_process_budget_rejects_invalid_runtime_environment_values(environment: dict[Any, Any]) -> None:
+    with pytest.raises(ValueError, match="Subprocess environment names and values must be valid NUL-free strings"):
+        validate_process_budget(["tool"], environment=environment, platform_name="nt")
+
+
 def test_run_process_reports_timeout() -> None:
     def timeout_runner(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         raise subprocess.TimeoutExpired(arguments, timeout=1)
@@ -463,8 +689,6 @@ import sys
 import time
 
 subprocess.Popen([sys.executable, "-c", sys.argv[3], sys.argv[2]])
-# Record identity before waiting on the descendant. The reap timeout can fire while
-# this process is still waiting, and the test needs the pid either way.
 pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding="utf-8")
 deadline = time.monotonic() + 5
 while not pathlib.Path(sys.argv[2]).exists() and time.monotonic() < deadline:
@@ -530,7 +754,12 @@ def test_parse_stream_matches_rejects_non_object_json_line() -> None:
     ("payload", "message"),
     [
         pytest.param(b"{\n", "invalid JSON", id="malformed"),
-        pytest.param(b'{"path":"a.py"', "invalid JSON", id="truncated-at-eof"),
+        pytest.param(
+            b'{"path":"a.py","language":"Python","items":[],"future":NaN}\n',
+            "invalid JSON",
+            id="non-finite-number",
+        ),
+        pytest.param(b'{"path":"a.py"', "incomplete NDJSON", id="truncated-at-eof"),
         pytest.param(b"[]\n", "non-object JSON", id="non-object-record"),
         pytest.param(
             b'{"path":"a.py","language":"Python","items":[1]}\n',
@@ -541,6 +770,11 @@ def test_parse_stream_matches_rejects_non_object_json_line() -> None:
             b'{"path":"a.py","language":"Python","items":[{"members":{}}]}\n',
             "non-list members",
             id="invalid-members",
+        ),
+        pytest.param(
+            b'{"path":"a.py","language":"Python","items":[{"members":[1]}]}\n',
+            "non-object node",
+            id="invalid-nested-node",
         ),
     ],
 )
@@ -579,7 +813,7 @@ def test_outline_stream_rejects_aggregate_over_four_mib(tmp_path: Path) -> None:
     records = [json.dumps({"path": f"file-{index}.py", "language": "Python", "items": [], "padding": padding}) for index in range(5)]
     payload_path = tmp_path / "aggregate.ndjson"
     payload_path.write_text("\n".join(records) + "\n", encoding="utf-8")
-    assert payload_path.stat().st_size > MAX_OUTLINE_AGGREGATE_BYTES
+    assert payload_path.stat().st_size > MAX_STRUCTURED_OUTPUT_BYTES
 
     with pytest.raises(RuntimeError, match="4 MiB aggregate limit"):
         run_outline_process(
@@ -617,8 +851,6 @@ import sys
 import time
 
 subprocess.Popen([sys.executable, "-c", sys.argv[3], sys.argv[2]])
-# Record identity before waiting on the descendant. The reap timeout can fire while
-# this process is still waiting, and the test needs the pid either way.
 pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding="utf-8")
 deadline = time.monotonic() + 5
 while not pathlib.Path(sys.argv[2]).exists() and time.monotonic() < deadline:
@@ -658,7 +890,7 @@ def test_outline_stream_stops_at_limit_plus_one_and_reaps_the_child(tmp_path: Pa
                     {
                         "path": f"file-{index}.py",
                         "language": "Python",
-                        "items": [{"name": f"node-{index}"}],
+                        "items": [canonical_outline_item(f"node-{index}")],
                     }
                 )
                 for index in range(2)
@@ -746,7 +978,6 @@ def test_validate_rule_yaml_rejects_regex_matcher_when_policy_enabled() -> None:
     ],
 )
 def test_regex_policy_reaches_every_regex_key_not_only_top_level_matchers(rule_yaml: str) -> None:
-    """The policy walks the whole document, which is broader than `rule:` matcher keys."""
     with pytest.raises(ValueError, match="Regex ast-grep rules are disabled"):
         validate_rule_yaml(rule_yaml, forbid_regex_rules=True)
 
@@ -1218,7 +1449,7 @@ def test_search_uses_limit_plus_one_globs_and_relative_results(tmp_path: Path) -
         pattern="print($A)",
         language="python",
         paths=["src"],
-        include_globs=["*.py"],
+        include_globs=["*.py", "--follow"],
         exclude_globs=["*_test.py"],
         max_results=1,
     )
@@ -1238,7 +1469,11 @@ def test_search_uses_limit_plus_one_globs_and_relative_results(tmp_path: Path) -
     command = runner.calls[0][0]
     assert command[1] == "scan"
     assert command[command.index("--max-results") + 1] == "2"
-    assert [command[index + 1] for index, value in enumerate(command) if value == "--globs"] == ["*.py", "!*_test.py"]
+    assert "--globs=*.py" in command
+    assert "--globs=--follow" in command
+    assert "--globs=!*_test.py" in command
+    assert "--globs" not in command
+    assert command[-2] == "--"
     assert command[-1] == str(source.parent)
 
 
@@ -1305,7 +1540,21 @@ def test_negative_rule_probe_returns_empty_list(tmp_path: Path) -> None:
     command = runner.calls[0][0]
     assert command[1] == "scan"
     assert "--stdin" in command
-    assert command[command.index("--max-results") + 1] == "500"
+    assert command[command.index("--max-results") + 1] == "501"
+
+
+def test_rule_probe_rejects_matches_beyond_the_configured_cap(tmp_path: Path) -> None:
+    payload = "\n".join(json.dumps(canonical_match()) for _ in range(2))
+    runner = RecordingRunner(stdout=payload)
+    service = AstGrepService(make_runtime(tmp_path, max_results_cap=1, default_max_results=1), runner=runner)
+
+    with pytest.raises(RuntimeError, match="exceeded the configured result cap"):
+        service.test_match_code_rule(
+            code="print(1)\nprint(2)\n",
+            rule_yaml="id: calls\nlanguage: python\nrule:\n  pattern: print($A)\n",
+        )
+    command = runner.calls[0][0]
+    assert command[command.index("--max-results") + 1] == "2"
 
 
 def test_search_returns_error_severity_diagnostics_streamed_on_exit_one(tmp_path: Path) -> None:
@@ -1316,7 +1565,6 @@ def test_search_returns_error_severity_diagnostics_streamed_on_exit_one(tmp_path
     match = {"file": str(source), "text": "print('value')", "range": {"start": {"line": 0}, "end": {"line": 0}}}
     runner = RecordingRunner(
         stdout=json.dumps(match),
-        # The exact two-line stderr 0.45.0 emits for a successful error-severity scan.
         stderr="Error: 1 error(s) found in code.\nHelp: Scan succeeded and found error level diagnostics in the codebase.\n",
         returncode=1,
     )
@@ -1355,7 +1603,6 @@ def test_search_exit_one_with_error_is_not_treated_as_no_match(tmp_path: Path) -
 
 
 def test_search_rejects_partial_results_when_a_path_failed(tmp_path: Path) -> None:
-    """Verified against 0.45.0: a bad path leaves exit 0 with partial findings on stdout."""
     project = tmp_path / "project"
     project.mkdir()
     source = project / "example.py"
@@ -1443,6 +1690,42 @@ def test_outline_rejects_a_path_outside_the_project(tmp_path: Path) -> None:
             paths=["a.py"],
             max_results=5,
         )
+
+
+def test_outline_rejects_unrequested_and_duplicate_contained_paths(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "a.py").write_text("def a(): pass\n", encoding="utf-8")
+    (project / "b.py").write_text("def b(): pass\n", encoding="utf-8")
+
+    unrequested = AstGrepService(
+        make_runtime(tmp_path),
+        outline_runner=RecordingOutlineRunner([_outline_document("b.py", 1)]),
+    )
+    with pytest.raises(RuntimeError, match="was not requested"):
+        unrequested.outline_code(project_folder="project", language=None, paths=["a.py"], max_results=5)
+
+    duplicate = AstGrepService(
+        make_runtime(tmp_path),
+        outline_runner=RecordingOutlineRunner([_outline_document("a.py", 1), _outline_document("a.py", 1)]),
+    )
+    with pytest.raises(RuntimeError, match="duplicate outline path"):
+        duplicate.outline_code(project_folder="project", language=None, paths=["a.py"], max_results=5)
+
+
+def test_outline_preserves_unknown_document_fields(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "a.py").write_text("def a(): pass\n", encoding="utf-8")
+    document = _outline_document("a.py", 1)
+    document["futureField"] = {"preserved": True}
+    service = AstGrepService(make_runtime(tmp_path), outline_runner=RecordingOutlineRunner([document]))
+
+    result = service.outline_code(project_folder="project", language=None, paths=["a.py"], max_results=5)
+
+    file_document = cast(dict[str, Any], result["files"][0])
+    assert file_document["futureField"] == {"preserved": True}
+    assert "path" not in file_document
 
 
 def test_outline_rejects_a_document_without_items(tmp_path: Path) -> None:
@@ -1536,10 +1819,12 @@ def test_format_outline_results_preserves_hierarchy_and_truncation() -> None:
     )
     text_result = outline_tool_result(results, "text")
     assert text_result.structured_content == results
-    assert text_result.content[0].text.startswith("Found 2 outline nodes")  # type: ignore[union-attr]
+    text_block = cast(Any, text_result.content[0])
+    assert text_block.text.startswith("Found 2 outline nodes")
     json_result = outline_tool_result(results, "json")
     assert json_result.structured_content == results
-    assert json.loads(json_result.content[0].text) == results  # type: ignore[union-attr]
+    json_block = cast(Any, json_result.content[0])
+    assert json.loads(json_block.text) == results
 
 
 def test_server_info_exposes_effective_contract(tmp_path: Path) -> None:
@@ -1547,10 +1832,675 @@ def test_server_info_exposes_effective_contract(tmp_path: Path) -> None:
 
     info = AstGrepService(runtime).get_server_info()
 
-    assert info["fork_version"] == "0.3.0"
+    assert info["fork_version"] == "0.4.0"
     assert info["ast_grep_version"] == SUPPORTED_AST_GREP_VERSION
     assert info["allowed_roots"] == [str(tmp_path)]
     assert info["default_max_results"] == 25
     assert info["max_results_cap"] == 100
     assert info["forbid_regex_rules"] is True
     assert os.path.isabs(info["ast_grep_executable"])
+
+
+def test_text_runner_streams_bounded_stdin_and_utf8_output(tmp_path: Path) -> None:
+    payload = "héllo\n" * 1000
+    result = run_text_process(
+        [sys.executable, "-c", "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"],
+        timeout_seconds=2,
+        input_text=payload,
+        working_directory=tmp_path,
+    )
+
+    assert result.completed.returncode == 0
+    assert result.completed.stdout == payload
+    assert result.completed.stderr == ""
+    assert result.stdout_truncated is False
+    assert result.stderr_truncated is False
+
+
+@pytest.mark.parametrize("payload", ["x" * (MAX_SNIPPET_INPUT_BYTES + 1), "\ud800"], ids=["oversized", "invalid-utf8"])
+def test_text_runner_rejects_oversized_or_invalid_utf8_input(tmp_path: Path, payload: str) -> None:
+    with pytest.raises(ValueError, match=r"1 MiB limit|valid UTF-8"):
+        run_text_process(
+            [sys.executable, "-c", "raise SystemExit"],
+            timeout_seconds=2,
+            input_text=payload,
+            working_directory=tmp_path,
+        )
+
+
+def test_text_runner_fails_closed_or_truncates_at_explicit_output_cap(tmp_path: Path) -> None:
+    command = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'x' * 129)"]
+    with pytest.raises(RuntimeError, match="structured output exceeds the 128-byte limit"):
+        run_text_process(command, timeout_seconds=2, working_directory=tmp_path, stdout_limit=128)
+
+    result = run_text_process(
+        command,
+        timeout_seconds=2,
+        working_directory=tmp_path,
+        stdout_limit=128,
+        truncate_stdout=True,
+    )
+    assert result.completed.stdout == "x" * 128
+    assert result.stdout_truncated is True
+
+
+def test_text_runner_trims_only_a_terminal_utf8_fragment_at_a_truncation_boundary(tmp_path: Path) -> None:
+    result = run_text_process(
+        [sys.executable, "-c", "import sys; sys.stdout.buffer.write('éé'.encode())"],
+        timeout_seconds=2,
+        working_directory=tmp_path,
+        stdout_limit=3,
+        truncate_stdout=True,
+    )
+    assert result.completed.stdout == "é"
+    assert result.stdout_truncated is True
+
+
+def test_text_runner_rejects_invalid_utf8_before_a_truncation_boundary(tmp_path: Path) -> None:
+    command = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'\\xffx')"]
+    with pytest.raises(RuntimeError, match="invalid UTF-8 on stdout"):
+        run_text_process(
+            command,
+            timeout_seconds=2,
+            working_directory=tmp_path,
+            stdout_limit=1,
+            truncate_stdout=True,
+        )
+
+
+def test_text_runner_terminates_promptly_on_non_truncating_overflow(tmp_path: Path) -> None:
+    command = [
+        sys.executable,
+        "-c",
+        "import sys,time; sys.stdout.buffer.write(b'x' * 65536); sys.stdout.buffer.flush(); time.sleep(30)",
+    ]
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="structured output exceeds the 128-byte limit"):
+        run_text_process(command, timeout_seconds=10, working_directory=tmp_path, stdout_limit=128)
+    assert time.monotonic() - started < 5
+
+
+def test_text_runner_reaps_descendants_after_the_leader_exits(tmp_path: Path) -> None:
+    descendant_port_path = tmp_path / "text-descendant.port"
+    leader_program = """
+import pathlib
+import subprocess
+import sys
+import time
+
+subprocess.Popen([sys.executable, "-c", sys.argv[2], sys.argv[1]])
+deadline = time.monotonic() + 5
+while not pathlib.Path(sys.argv[1]).exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+"""
+    result = run_text_process(
+        [
+            sys.executable,
+            "-c",
+            leader_program,
+            str(descendant_port_path),
+            descendant_listener_program(),
+        ],
+        timeout_seconds=5,
+        working_directory=tmp_path,
+    )
+    assert result.completed.returncode == 0
+    assert_descendant_listener_stopped(descendant_port_path)
+
+
+def test_ndjson_runner_reaps_descendants_after_the_leader_exits(tmp_path: Path) -> None:
+    descendant_port_path = tmp_path / "ndjson-descendant.port"
+    leader_program = """
+import json
+import pathlib
+import subprocess
+import sys
+import time
+
+subprocess.Popen([sys.executable, "-c", sys.argv[2], sys.argv[1]])
+deadline = time.monotonic() + 5
+while not pathlib.Path(sys.argv[1]).exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+sys.stdout.write(sys.argv[3] + "\\n")
+sys.stdout.flush()
+"""
+    with pytest.raises(RuntimeError, match="timed out"):
+        run_ndjson_process(
+            [
+                sys.executable,
+                "-c",
+                leader_program,
+                str(descendant_port_path),
+                descendant_listener_program(),
+                json.dumps(canonical_match()),
+            ],
+            timeout_seconds=2,
+            working_directory=tmp_path,
+            record_parser=_parse_match_record,
+            item_limit=10,
+        )
+    assert_descendant_listener_stopped(descendant_port_path)
+
+
+@pytest.mark.parametrize(("stream", "message"), [("stdout", "stdout"), ("stderr", "stderr")])
+def test_text_runner_rejects_invalid_utf8_output(tmp_path: Path, stream: str, message: str) -> None:
+    destination = "stdout" if stream == "stdout" else "stderr"
+    command = [sys.executable, "-c", f"import sys; sys.{destination}.buffer.write(b'\\xff')"]
+    with pytest.raises(RuntimeError, match=f"invalid UTF-8 on {message}"):
+        run_text_process(command, timeout_seconds=2, working_directory=tmp_path)
+
+
+def test_text_runner_enforces_strict_diagnostic_cap(tmp_path: Path) -> None:
+    command = [sys.executable, "-c", "import sys; sys.stderr.buffer.write(b'x' * 129)"]
+    with pytest.raises(RuntimeError, match="diagnostic output exceeds the 128-byte limit"):
+        run_text_process(
+            command,
+            timeout_seconds=2,
+            working_directory=tmp_path,
+            stderr_limit=128,
+            truncate_stderr=False,
+        )
+
+
+def test_match_ndjson_runner_preserves_unknown_fields_and_canonical_offsets(tmp_path: Path) -> None:
+    match = canonical_match(text="é")
+    match["futureField"] = {"kept": True}
+    payload = tmp_path / "matches.ndjson"
+    payload.write_text(json.dumps(match) + "\n", encoding="utf-8")
+
+    result = run_ndjson_process(
+        file_stdout_command(payload),
+        timeout_seconds=2,
+        working_directory=tmp_path,
+        record_parser=_parse_match_record,
+        item_limit=10,
+    )
+
+    assert result.records == [match]
+    assert result.records[0]["futureField"] == {"kept": True}
+    assert result.observed_extra is False
+    assert result.returncode == 0
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        pytest.param(b"\xff\n", "invalid UTF-8", id="invalid-utf8"),
+        pytest.param(b"{oops}\n", "invalid JSON", id="malformed-json"),
+        pytest.param(b'{"future":NaN}\n', "invalid JSON", id="non-finite-number"),
+        pytest.param(b"[]\n", "non-object JSON", id="non-object"),
+        pytest.param(b"\n", "empty NDJSON", id="empty-record"),
+        pytest.param(b'{"text":"partial"}', "incomplete NDJSON", id="incomplete-record"),
+    ],
+)
+def test_match_ndjson_runner_rejects_invalid_records(tmp_path: Path, payload: bytes, message: str) -> None:
+    payload_path = tmp_path / "invalid.ndjson"
+    payload_path.write_bytes(payload)
+    with pytest.raises(RuntimeError, match=message):
+        run_ndjson_process(
+            file_stdout_command(payload_path),
+            timeout_seconds=2,
+            working_directory=tmp_path,
+            record_parser=_parse_match_record,
+            item_limit=10,
+        )
+
+
+def test_match_ndjson_runner_rejects_oversized_record_and_diagnostics(tmp_path: Path) -> None:
+    oversized = tmp_path / "oversized.ndjson"
+    oversized.write_bytes(b"x" * (MAX_NDJSON_RECORD_BYTES + 1) + b"\n")
+    with pytest.raises(RuntimeError, match="record exceeds the 1024 KiB limit"):
+        run_ndjson_process(
+            file_stdout_command(oversized),
+            timeout_seconds=2,
+            working_directory=tmp_path,
+            record_parser=_parse_match_record,
+        )
+
+    diagnostics = [
+        sys.executable,
+        "-c",
+        f"import sys; sys.stderr.buffer.write(b'x' * {MAX_SUBPROCESS_DIAGNOSTIC_BYTES + 1})",
+    ]
+    with pytest.raises(RuntimeError, match="diagnostic output exceeds the 64 KiB limit"):
+        run_ndjson_process(
+            diagnostics,
+            timeout_seconds=2,
+            working_directory=tmp_path,
+            record_parser=_parse_match_record,
+        )
+
+
+def test_match_validator_accepts_transforms_replacement_and_multiple_metavariables() -> None:
+    match = canonical_match()
+    match["metaVariables"] = {
+        "single": {"A": {"text": "1", "range": source_range("1", start_offset=6, start_column=6)}},
+        "multi": {"ARGS": [{"text": "1", "range": source_range("1", start_offset=6, start_column=6)}]},
+        "transformed": {"NORMALIZED": "one"},
+    }
+    match["replacement"] = "logger.info(1)"
+    match["replacementOffsets"] = {"start": 10, "end": 18}
+    match["metadata"] = {"category": "test"}
+    match["labels"][0]["message"] = "primary"
+
+    validate_match_document(match, record_number=1)
+
+
+def test_match_validator_accepts_omitted_empty_labels() -> None:
+    match = canonical_match()
+    del match["labels"]
+    validate_match_document(match, record_number=1)
+
+
+def test_match_validator_accepts_multiline_position_geometry() -> None:
+    text = "one\nβ"
+    match = canonical_match(text=text)
+    match["lines"] = text
+    match["range"]["end"] = {"line": 1, "column": 1}
+    match["labels"][0]["range"]["end"] = {"line": 1, "column": 1}
+    validate_match_document(match, record_number=1)
+
+
+@pytest.mark.parametrize(
+    "end",
+    [
+        pytest.param({"line": 0, "column": 7}, id="wrong-same-line-column"),
+        pytest.param({"line": 2, "column": 1}, id="wrong-multiline-row"),
+        pytest.param({"line": 1, "column": 2}, id="wrong-multiline-column"),
+    ],
+)
+def test_match_validator_rejects_impossible_position_geometry(end: dict[str, int]) -> None:
+    text = "one\nβ" if end["line"] else "print(1)"
+    match = canonical_match(text=text)
+    match["lines"] = text
+    match["range"]["end"] = end
+    with pytest.raises(RuntimeError, match="line and column geometry"):
+        validate_match_document(match, record_number=1)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        pytest.param(("range", None), "invalid range", id="range"),
+        pytest.param(("charCount", {"leading": -1, "trailing": 0}), "charCount.leading", id="character-count"),
+        pytest.param(("severity", "critical"), "invalid severity", id="severity"),
+        pytest.param(("labels", {}), "invalid labels", id="labels"),
+        pytest.param(("metadata", []), "invalid metadata", id="metadata"),
+    ],
+)
+def test_match_validator_rejects_invalid_typed_fields(mutation: tuple[str, Any], message: str) -> None:
+    match = canonical_match()
+    field, value = mutation
+    match[field] = value
+    with pytest.raises(RuntimeError, match=message):
+        validate_match_document(match, record_number=7)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        pytest.param("text", None, "no text", id="text"),
+        pytest.param("lines", None, "no lines", id="lines"),
+        pytest.param("file", "", "no file", id="file"),
+        pytest.param("language", "", "no language", id="language"),
+        pytest.param("ruleId", "", "no ruleId", id="rule-id"),
+        pytest.param("message", None, "invalid message", id="message"),
+        pytest.param("note", 1, "invalid note", id="note"),
+    ],
+)
+def test_match_validator_rejects_missing_canonical_fields(field: str, value: Any, message: str) -> None:
+    match = canonical_match()
+    match[field] = value
+    with pytest.raises(RuntimeError, match=message):
+        validate_match_document(match, record_number=3)
+
+
+def test_match_validator_rejects_invalid_metavariable_and_label_details() -> None:
+    invalid_context = canonical_match()
+    invalid_context["charCount"] = {"leading": 9, "trailing": 0}
+    with pytest.raises(RuntimeError, match="character context counts"):
+        validate_match_document(invalid_context, record_number=1)
+
+    inconsistent_context = canonical_match()
+    inconsistent_context["lines"] = "different"
+    with pytest.raises(RuntimeError, match="inconsistent character context"):
+        validate_match_document(inconsistent_context, record_number=1)
+
+    invalid_meta_text = canonical_match()
+    invalid_meta_text["metaVariables"]["single"] = {"A": {"text": 1, "range": source_range("1")}}
+    with pytest.raises(RuntimeError, match=r"single\.A\.text"):
+        validate_match_document(invalid_meta_text, record_number=1)
+
+    invalid_transform = canonical_match()
+    invalid_transform["metaVariables"]["transformed"] = {"A": 1}
+    with pytest.raises(RuntimeError, match="transformed metavariables"):
+        validate_match_document(invalid_transform, record_number=1)
+
+    invalid_label_text = canonical_match()
+    invalid_label_text["labels"][0]["text"] = None
+    with pytest.raises(RuntimeError, match=r"labels\[0\].text"):
+        validate_match_document(invalid_label_text, record_number=1)
+
+    invalid_label_style = canonical_match()
+    invalid_label_style["labels"][0]["style"] = "tertiary"
+    with pytest.raises(RuntimeError, match=r"labels\[0\].style"):
+        validate_match_document(invalid_label_style, record_number=1)
+
+    invalid_label_message = canonical_match()
+    invalid_label_message["labels"][0]["message"] = 1
+    with pytest.raises(RuntimeError, match=r"labels\[0\].message"):
+        validate_match_document(invalid_label_message, record_number=1)
+
+    outside_label = canonical_match()
+    outside_label["labels"][0] = {
+        "text": "x",
+        "range": source_range("x", start_offset=20, start_column=20),
+        "style": "secondary",
+    }
+    validate_match_document(outside_label, record_number=1)
+
+    without_rule_fields = canonical_match()
+    without_rule_fields.pop("ruleId")
+    validate_match_document(without_rule_fields, record_number=1, require_rule_fields=False)
+
+
+def test_match_validator_rejects_reversed_positions_and_inconsistent_utf8() -> None:
+    reversed_position = canonical_match()
+    reversed_position["range"]["end"] = {"line": 0, "column": 0}
+    reversed_position["range"]["start"] = {"line": 1, "column": 0}
+    with pytest.raises(RuntimeError, match="reversed half-open positions"):
+        validate_match_document(reversed_position, record_number=1)
+
+    inconsistent = canonical_match(text="é")
+    inconsistent["range"]["byteOffset"]["end"] = 1
+    with pytest.raises(RuntimeError, match="inconsistent UTF-8 byte offsets"):
+        validate_match_document(inconsistent, record_number=1)
+
+    outside = canonical_match()
+    outside["metaVariables"]["single"] = {"A": {"text": "x", "range": source_range("x", start_offset=20, start_column=20)}}
+    validate_match_document(outside, record_number=1)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        pytest.param({"replacement": "new"}, id="missing-offsets"),
+        pytest.param({"replacementOffsets": {"start": 0, "end": 1}}, id="missing-replacement"),
+        pytest.param({"replacement": 1, "replacementOffsets": {"start": 0, "end": 1}}, id="non-string"),
+        pytest.param({"replacement": "new", "replacementOffsets": {"start": 2, "end": 1}}, id="reversed"),
+    ],
+)
+def test_match_validator_rejects_invalid_replacement_pairs(mutation: dict[str, Any]) -> None:
+    match = canonical_match()
+    match.update(mutation)
+    with pytest.raises(RuntimeError, match="replacement"):
+        validate_match_document(match, record_number=1)
+
+
+def test_find_code_builds_contextual_selector_strictness_and_preview_only_deletion(tmp_path: Path) -> None:
+    source = tmp_path / "sample.py"
+    source.write_text("print(1)\n", encoding="utf-8")
+    runner = RecordingRunner()
+    service = AstGrepService(make_runtime(tmp_path), runner=runner)
+
+    result = service.find_code(
+        project_folder=str(tmp_path),
+        pattern="context(print($A))",
+        language="python",
+        selector="call",
+        strictness="ast",
+        rewrite="",
+        paths=["sample.py"],
+        include_globs=None,
+        exclude_globs=None,
+        max_results=5,
+    )
+
+    assert result["matches"] == []
+    command = runner.calls[0][0]
+    rule = yaml.safe_load(command[command.index("--inline-rules") + 1])
+    assert rule["rule"]["pattern"] == {
+        "context": "context(print($A))",
+        "strictness": "ast",
+        "selector": "call",
+    }
+    assert rule["fix"] == ""
+    assert "--update-all" not in command
+    assert "--rewrite-all" not in command
+
+
+@pytest.mark.parametrize(
+    ("selector", "strictness", "rewrite", "message"),
+    [
+        pytest.param("", "smart", None, "selector", id="empty-selector"),
+        pytest.param(None, "invalid", None, "strictness", id="strictness"),
+        pytest.param(None, "smart", "\ud800", "valid UTF-8", id="rewrite-utf8"),
+    ],
+)
+def test_find_code_rejects_invalid_new_options(
+    tmp_path: Path,
+    selector: str | None,
+    strictness: Any,
+    rewrite: str | None,
+    message: str,
+) -> None:
+    source = tmp_path / "sample.py"
+    source.write_text("print(1)\n", encoding="utf-8")
+    service = AstGrepService(make_runtime(tmp_path), runner=RecordingRunner())
+    with pytest.raises(ValueError, match=message):
+        service.find_code(
+            project_folder=str(tmp_path),
+            pattern="print($A)",
+            language="python",
+            selector=selector,
+            strictness=strictness,
+            rewrite=rewrite,
+            paths=["sample.py"],
+            include_globs=None,
+            exclude_globs=None,
+            max_results=5,
+        )
+
+
+def test_outline_forwards_items_symbol_types_and_public_member_filter(tmp_path: Path) -> None:
+    source = tmp_path / "sample.py"
+    source.write_text("def public(): pass\n", encoding="utf-8")
+    outline_runner = RecordingOutlineRunner([{"path": str(source), "language": "Python", "items": []}])
+    service = AstGrepService(make_runtime(tmp_path), outline_runner=outline_runner)
+
+    service.outline_code(
+        project_folder=str(tmp_path),
+        paths=["sample.py"],
+        language="python",
+        max_results=5,
+        items="exports",
+        symbol_types=["function", "class", "function"],
+        public_members=True,
+    )
+
+    command = outline_runner.calls[0][0]
+    assert command[command.index("--items") + 1] == "exports"
+    assert command[command.index("--type") + 1] == "function,class"
+    assert "--pub-members" in command
+    assert command[-2:] == ["--", str(source)]
+
+
+@pytest.mark.parametrize(
+    ("items", "symbol_types", "message"),
+    [
+        pytest.param("unknown", None, "item mode", id="items"),
+        pytest.param("auto", ["unknown"], "symbol type", id="symbol-type"),
+        pytest.param("auto", [1], "symbol type", id="non-string-symbol-type"),
+    ],
+)
+def test_outline_rejects_invalid_modes_and_symbol_types(
+    tmp_path: Path,
+    items: Any,
+    symbol_types: Any,
+    message: str,
+) -> None:
+    source = tmp_path / "sample.py"
+    source.write_text("pass\n", encoding="utf-8")
+    service = AstGrepService(make_runtime(tmp_path), outline_runner=RecordingOutlineRunner([]))
+    with pytest.raises(ValueError, match=message):
+        service.outline_code(
+            project_folder=str(tmp_path),
+            paths=["sample.py"],
+            language=None,
+            max_results=5,
+            items=items,
+            symbol_types=symbol_types,
+        )
+
+
+def test_configured_scan_uses_private_config_exact_escaped_ids_and_metadata(tmp_path: Path) -> None:
+    source = tmp_path / "sample.py"
+    source.write_text("literal_id = 1\n", encoding="utf-8")
+    match = {"file": str(source), "text": "literal_id = 1", "range": {"start": {"line": 0}, "end": {"line": 0}}}
+    runner = RecordingRunner(stdout=json.dumps(match) + "\n")
+    snapshot = fake_config_snapshot(tmp_path)
+    runtime = replace(make_runtime(tmp_path), config_snapshot=snapshot)
+    service = AstGrepService(runtime, runner=runner)
+
+    result = service.scan_project_rules(
+        project_folder=str(tmp_path),
+        rule_ids=["literal.dot+id", "literal.dot+id"],
+        paths=["sample.py"],
+        include_globs=["**/*.py"],
+        exclude_globs=None,
+        max_results=5,
+        include_metadata=True,
+    )
+
+    assert result["matches"][0]["file"] == "sample.py"
+    command = runner.calls[0][0]
+    assert command[command.index("--config") + 1] == str(snapshot.project_config_path)
+    assert command[command.index("--filter") + 1] == r"^(?:literal\.dot\+id)$"
+    assert "--include-metadata" in command
+    assert "--inline-rules" not in command
+    assert command[-2:] == ["--", "sample.py"]
+
+
+@pytest.mark.parametrize("rule_ids", [[], ["unknown"], [""], [1]])
+def test_configured_scan_rejects_invalid_rule_id_filters(tmp_path: Path, rule_ids: Any) -> None:
+    snapshot = fake_config_snapshot(tmp_path)
+    service = AstGrepService(replace(make_runtime(tmp_path), config_snapshot=snapshot), runner=RecordingRunner())
+    with pytest.raises(ValueError, match=r"rule_ids|configured rule id"):
+        service.scan_project_rules(
+            project_folder=str(tmp_path),
+            rule_ids=rule_ids,
+            paths=None,
+            include_globs=None,
+            exclude_globs=None,
+            max_results=5,
+        )
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr", "passed"),
+    [
+        pytest.param(0, "all passed\n", "", True, id="passed"),
+        pytest.param(4, "one failed\n", "failure details\n", False, id="failed"),
+    ],
+)
+def test_configured_tests_are_read_only_and_report_expected_failures(
+    tmp_path: Path,
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    passed: bool,
+) -> None:
+    snapshot = fake_config_snapshot(tmp_path)
+    runner = RecordingRunner(stdout=stdout, stderr=stderr, returncode=returncode)
+    service = AstGrepService(replace(make_runtime(tmp_path), config_snapshot=snapshot), runner=runner)
+
+    result = service.test_project_rules(rule_ids=["configured-print"])
+
+    assert result["passed"] is passed
+    assert stdout.strip() in result["report"]
+    command, kwargs = runner.calls[0]
+    assert command[command.index("--config") + 1] == str(snapshot.test_config_path)
+    assert command[command.index("--filter") + 1] == r"^(?:configured\-print)$"
+    assert "--interactive" not in command
+    assert "--update-all" not in command
+    assert kwargs["cwd"] == str(snapshot.bundle_root)
+
+
+def test_configured_test_execution_errors_and_report_truncation(tmp_path: Path) -> None:
+    snapshot = fake_config_snapshot(tmp_path)
+    service = AstGrepService(
+        replace(make_runtime(tmp_path), config_snapshot=snapshot),
+        runner=RecordingRunner(stderr="invalid configuration", returncode=8),
+    )
+    with pytest.raises(RuntimeError, match="exit code 8"):
+        service.test_project_rules()
+
+    report, truncated = service._bounded_report("é" * MAX_TEST_REPORT_BYTES, "diagnostic")
+    assert len(report.encode("utf-8")) <= MAX_TEST_REPORT_BYTES
+    assert report.endswith("…")
+    assert truncated is True
+
+
+def test_configured_capabilities_are_required_and_exposed_in_server_info(tmp_path: Path) -> None:
+    runtime = make_runtime(tmp_path)
+    service = AstGrepService(runtime, runner=RecordingRunner())
+    with pytest.raises(ValueError, match="No project rules"):
+        service.scan_project_rules(
+            project_folder=str(tmp_path),
+            rule_ids=None,
+            paths=None,
+            include_globs=None,
+            exclude_globs=None,
+            max_results=5,
+        )
+    with pytest.raises(ValueError, match="No project rule tests"):
+        service.test_project_rules()
+
+    snapshot = fake_config_snapshot(tmp_path)
+    info = AstGrepService(replace(runtime, config_snapshot=snapshot)).get_server_info()
+    assert info["configuration_digest"] == "a" * 64
+    assert info["configuration_provenance"] == snapshot.provenance
+    assert info["capabilities"] == snapshot.capabilities
+    assert info["coordinate_conventions"]["range"] == "half-open [start,end)"
+    assert info["resource_limits"]["snippet_input_bytes"] == MAX_SNIPPET_INPUT_BYTES
+    assert info["resource_limits"]["structured_output_bytes"] == MAX_STRUCTURED_OUTPUT_BYTES
+    assert info["resource_limits"]["native_library_bytes"] == MAX_NATIVE_LIBRARY_BYTES
+    assert info["resource_limits"]["windows_create_process_characters"] == WINDOWS_CREATE_PROCESS_LIMIT
+    assert info["resource_limits"]["posix_arg_headroom_bytes"] == POSIX_ARG_HEADROOM_BYTES
+    assert info["resource_limits"]["process_termination_grace_seconds"] == PROCESS_TERMINATION_GRACE_SECONDS
+
+
+def test_argument_parser_accepts_repeated_trusted_native_libraries(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "ast-grep-server",
+            "--trusted-native-library",
+            "one.dylib",
+            "a" * 64,
+            "--trusted-native-library",
+            "two.so",
+            "b" * 64,
+        ],
+    )
+    args = build_argument_parser().parse_args()
+    assert args.trusted_native_library == [["one.dylib", "a" * 64], ["two.so", "b" * 64]]
+
+
+def test_match_text_format_includes_rule_preview_offsets_and_transformations() -> None:
+    match = canonical_match(file="src/example.py")
+    match["replacement"] = ""
+    match["replacementOffsets"] = {"start": 0, "end": 8}
+    match["metaVariables"]["transformed"] = {"NORMALIZED": "one"}
+    match["fix"] = {"template": "$NORMALIZED"}
+    match["transform"] = {"NORMALIZED": "converted"}
+    match["rewriters"] = [{"id": "convert"}]
+
+    formatted = format_matches_as_text([match])
+
+    assert "Rule: test-rule (warning) — test message" in formatted
+    assert "Preview replacement: <delete match>" in formatted
+    assert 'Replacement offsets: {"start":0,"end":8}' in formatted
+    assert 'Transformed metavariables: {"NORMALIZED":"one"}' in formatted
+    assert "rewriters:" in formatted

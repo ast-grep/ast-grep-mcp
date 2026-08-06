@@ -1,0 +1,6 @@
+include AGENTS.md
+include ast-grep.mdc
+include uv.lock
+include .python-version
+recursive-include scripts *.py
+recursive-include tests *.py *.yml
