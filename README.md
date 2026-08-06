@@ -210,12 +210,6 @@ Distribution verification stays in the repository-owned locked environment: tool
 
 `AGENTS.md` defines the repository execution boundary. `scripts/verify_environment.py` fails unless verification runs from the repository root in its `.venv`, and it rejects alternate, isolated, cached, and external environment commands in verification surfaces. `scripts/launch_server.py` checks the lock and synchronized environment without updating either before starting stdio. CI fixes `UV_PROJECT_ENVIRONMENT` to `.venv`, synchronizes once with `--locked`, and runs every subsequent tool with `--no-sync`.
 
-## Release boundary
-
-The release workflow accepts protected `v*` tags, verifies the tag is exactly `v<project.version>`, reruns three-platform acceptance against ast-grep 0.45.0, builds and checks the sdist and pure Python wheel, and publishes through PyPI trusted publishing only from the protected `pypi` environment.
-
-Creating commits or tags, pushing, configuring the GitHub environment, and enabling PyPI trusted publishing remain operator actions.
-
 ## Rule-authoring guidance
 
 [`ast-grep.mdc`](ast-grep.mdc) records the official ast-grep agent-skill workflow and rule reference used by this repository. Repository working agreements remain authoritative over generic upstream guidance.
