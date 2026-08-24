@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "pydantic>=2.11.0",
-    "mcp[cli]>=1.6.0",
+    "mcp[cli]>=2.0.0,<3",
     "pyyaml>=6.0.2",
 ]
 
@@ -57,4 +57,3 @@ warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
 ignore_missing_imports = true
-

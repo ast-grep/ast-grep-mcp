@@ -12,9 +12,9 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-# Mock FastMCP to disable decoration
-class MockFastMCP:
-    """Mock FastMCP that returns functions unchanged"""
+# Mock MCPServer to disable decoration
+class MockMCPServer:
+    """Mock MCPServer that returns functions unchanged"""
 
     def __init__(self, name):
         self.name = name
@@ -41,7 +41,7 @@ def mock_field(**kwargs):
 
 
 # Patch the imports before loading main
-with patch("mcp.server.fastmcp.FastMCP", MockFastMCP):
+with patch("mcp.server.MCPServer", MockMCPServer):
     with patch("pydantic.Field", mock_field):
         import main
         from main import (
@@ -457,6 +457,33 @@ class TestRunAstGrep:
             ],
             None,
         )
+
+
+class TestRunMCPServer:
+    """Test MCP server transport configuration."""
+
+    @patch("main.mcp")
+    @patch("main.register_mcp_tools")
+    @patch("main.parse_args_and_get_config")
+    @patch("main.TRANSPORT_TYPE", "stdio")
+    def test_stdio_transport(self, mock_parse_args, mock_register_tools, mock_mcp):
+        main.run_mcp_server()
+
+        mock_parse_args.assert_called_once_with()
+        mock_register_tools.assert_called_once_with()
+        mock_mcp.run.assert_called_once_with(transport="stdio")
+
+    @patch("main.mcp")
+    @patch("main.register_mcp_tools")
+    @patch("main.parse_args_and_get_config")
+    @patch("main.SERVER_PORT", 4321)
+    @patch("main.TRANSPORT_TYPE", "sse")
+    def test_sse_transport(self, mock_parse_args, mock_register_tools, mock_mcp):
+        main.run_mcp_server()
+
+        mock_parse_args.assert_called_once_with()
+        mock_register_tools.assert_called_once_with()
+        mock_mcp.run.assert_called_once_with(transport="sse", port=4321)
 
 
 if __name__ == "__main__":

@@ -11,9 +11,9 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-# Mock FastMCP to disable decoration
-class MockFastMCP:
-    """Mock FastMCP that returns functions unchanged"""
+# Mock MCPServer to disable decoration
+class MockMCPServer:
+    """Mock MCPServer that returns functions unchanged"""
 
     def __init__(self, name):
         self.name = name
@@ -40,7 +40,7 @@ def mock_field(**kwargs):
 
 
 # Import with mocked decorators
-with patch("mcp.server.fastmcp.FastMCP", MockFastMCP):
+with patch("mcp.server.MCPServer", MockMCPServer):
     with patch("pydantic.Field", mock_field):
         import main
 

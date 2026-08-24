@@ -7,7 +7,7 @@ import sys
 from typing import Any, List, Literal, Optional
 
 import yaml
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 from pydantic import Field
 
 
@@ -93,8 +93,8 @@ For more information, see: https://github.com/ast-grep/ast-grep-mcp
         CONFIG_PATH = env_config
 
 
-# Initialize FastMCP server
-mcp = FastMCP("ast-grep")
+# Initialize MCP server
+mcp = MCPServer("ast-grep")
 
 DumpFormat = Literal["pattern", "cst", "ast"]
 
@@ -410,8 +410,9 @@ def run_mcp_server() -> None:
     parse_args_and_get_config()  # sets CONFIG_PATH, TRANSPORT_TYPE, and SERVER_PORT
     register_mcp_tools()  # tools defined *after* CONFIG_PATH is known
     if TRANSPORT_TYPE == "sse":
-        mcp.settings.port = SERVER_PORT
-    mcp.run(transport=TRANSPORT_TYPE) # type: ignore[arg-type]
+        mcp.run(transport="sse", port=SERVER_PORT)
+    else:
+        mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
