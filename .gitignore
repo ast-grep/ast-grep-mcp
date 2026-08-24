@@ -8,12 +8,15 @@ wheels/
 
 # MyPy. Ruff, PyTest cache folders
 .*_cache/
+.tmp/
 .coverage
 .coverage.*
 
-# Virtual environments
+# Virtual environments and Node dependencies
 .venv
-/.project-sast-runtime/
+node_modules/
+analysis-sidecar/target/
+/.ast-soleaux-runtime/
 
 # Local environment files
 .env.local

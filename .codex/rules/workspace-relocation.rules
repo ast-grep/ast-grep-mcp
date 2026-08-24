@@ -1,0 +1,37 @@
+prefix_rule(
+    pattern = ["git", "clone"],
+    decision = "forbidden",
+    justification = "Work only in the supplied checkout; do not create an alternate clone for repository work.",
+    match = [
+        "git clone https://github.com/ast-grep/ast-grep-mcp.git",
+    ],
+    not_match = [
+        "git status --short",
+    ],
+)
+
+prefix_rule(
+    pattern = ["git", "worktree", ["add", "move"]],
+    decision = "forbidden",
+    justification = "Work only in the supplied checkout; do not create or relocate a worktree for repository work.",
+    match = [
+        "git worktree add ../ast-copy",
+        "git worktree move ../ast-copy",
+    ],
+    not_match = [
+        "git worktree list",
+        "git status --short",
+    ],
+)
+
+prefix_rule(
+    pattern = ["mktemp"],
+    decision = "forbidden",
+    justification = "Keep development, build, packaging, and verification artifacts inside the supplied repository.",
+    match = [
+        "mktemp -d",
+    ],
+    not_match = [
+        "uv run --no-sync python tests/package_smoke.py dist/package.whl dist/package.tar.gz 0.4.0",
+    ],
+)

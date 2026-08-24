@@ -1,0 +1,1016 @@
+{
+  "server": {
+    "product": "ast-soleaux",
+    "fastmcp_name": "ast-soleaux",
+    "distribution": "ast-soleaux",
+    "import_package": "ast_soleaux",
+    "console_command": "ast-soleaux",
+    "version": "0.5.0",
+    "resources": [],
+    "resource_templates": [],
+    "prompts": []
+  },
+  "fingerprint": {
+    "algorithm": "sha256",
+    "encoding": "canonical-json-utf8",
+    "fields": [
+      "key",
+      "name",
+      "version",
+      "title",
+      "description",
+      "input_schema",
+      "output_schema",
+      "annotations",
+      "tags"
+    ]
+  },
+  "profiles": {
+    "baseline": {
+      "count": 6,
+      "tools": [
+        "dump_syntax_tree",
+        "test_match_code_rule",
+        "outline_code",
+        "find_code",
+        "find_code_by_rule",
+        "get_server_info"
+      ]
+    },
+    "oxc": {
+      "count": 11,
+      "adds": [
+        "oxc_modules",
+        "oxc_transform",
+        "oxc_transform_files",
+        "oxc_minify",
+        "oxc_minify_files"
+      ]
+    },
+    "semantic": {
+      "count": 15,
+      "adds": [
+        "semantic_scopes",
+        "semantic_symbols",
+        "semantic_references",
+        "semantic_cfg"
+      ]
+    },
+    "configured": {
+      "count": 17,
+      "adds": [
+        "scan_project_rules",
+        "test_project_rules"
+      ]
+    },
+    "typescript_compiler": {
+      "count": 18,
+      "adds": [
+        "inspect_typescript_project"
+      ]
+    },
+    "postgresql": {
+      "count": 21,
+      "adds": [
+        "postgres_parse",
+        "postgres_parse_files",
+        "postgres_deparse_preview"
+      ]
+    },
+    "all": {
+      "count": 22,
+      "adds": [
+        "typescript_execute"
+      ]
+    }
+  },
+  "shared_contracts": {
+    "source": {
+      "discriminator": "kind",
+      "variants": {
+        "inline": {
+          "required": [
+            "kind",
+            "filename",
+            "code"
+          ],
+          "properties": {
+            "kind": {
+              "const": "inline"
+            },
+            "filename": {
+              "type": "string"
+            },
+            "code": {
+              "type": "string",
+              "max_bytes": 1048576
+            }
+          }
+        },
+        "file": {
+          "required": [
+            "kind",
+            "project_folder",
+            "path"
+          ],
+          "properties": {
+            "kind": {
+              "const": "file"
+            },
+            "project_folder": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string",
+              "relative": true
+            }
+          }
+        }
+      }
+    },
+    "conflict_policy": {
+      "enum": [
+        "error",
+        "overwrite",
+        "skip"
+      ],
+      "default": "error"
+    },
+    "execution_profiles": {
+      "isolated": {
+        "network": false,
+        "project_writes": false,
+        "environment": "sanitized",
+        "writable_overlay": true
+      },
+      "workspace-write": {
+        "network": false,
+        "project_writes": true,
+        "environment": "sanitized",
+        "writable_overlay": true
+      },
+      "networked": {
+        "network": true,
+        "project_writes": false,
+        "environment": "sanitized",
+        "writable_overlay": true
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "dump_syntax_tree",
+      "family": "structural",
+      "visibility": "baseline",
+      "tags": [
+        "structural",
+        "read-only"
+      ],
+      "annotations": {
+        "read_only": true,
+        "destructive": false,
+        "idempotent": true,
+        "open_world": false
+      },
+      "timeout_seconds": 30,
+      "required_inputs": [
+        "code",
+        "language"
+      ],
+      "optional_inputs": {
+        "format": "cst"
+      },
+      "output_fields": [
+        "result"
+      ]
+    },
+    {
+      "name": "test_match_code_rule",
+      "family": "structural",
+      "visibility": "baseline",
+      "tags": [
+        "structural",
+        "read-only"
+      ],
+      "annotations": {
+        "read_only": true,
+        "destructive": false,
+        "idempotent": true,
+        "open_world": false
+      },
+      "timeout_seconds": 30,
+      "required_inputs": [
+        "code",
+        "yaml"
+      ],
+      "optional_inputs": {
+        "text_equals": null,
+        "text_starts_with": null,
+        "text_contains": null
+      },
+      "output_fields": [
+        "result"
+      ]
+    },
+    {
+      "name": "outline_code",
+      "family": "structural",
+      "visibility": "baseline",
+      "tags": [
+        "structural",
+        "read-only"
+      ],
+      "annotations": {
+        "read_only": true,
+        "destructive": false,
+        "idempotent": true,
+        "open_world": false
+      },
+      "timeout_seconds": 30,
+      "required_inputs": [
+        "project_folder"
+      ],
+      "optional_inputs": {
+        "paths": null,
+        "include_globs": null,
+        "exclude_globs": null,
+        "strict_paths": false,
+        "language": null,
+        "max_results": null,
+        "items": "auto",
+        "symbol_types": null,
+        "public_members": false,
+        "output_format": "text"
+      },
+      "output_fields": [
+        "files",
+        "returned",
+        "truncated",
+        "limit",
+        "resolved_paths",
+        "path_errors"
+      ]
+    },
+    {
+      "name": "find_code",
+      "family": "structural",
+      "visibility": "baseline",
+      "tags": [
+        "structural",
+        "read-only"
+      ],
+      "annotations": {
+        "read_only": true,
+        "destructive": false,
+        "idempotent": true,
+        "open_world": false
+      },
+      "timeout_seconds": 30,
+      "required_inputs": [
+        "project_folder",
+        "pattern",
+        "language"
+      ],
+      "optional_inputs": {
+        "selector": null,
+        "strictness": "smart",
+        "rewrite": null,
+        "paths": null,
+        "include_globs": null,
+        "exclude_globs": null,
+        "max_results": null,
+        "cursor": null,
+        "output_format": "text"
+      },
+      "output_fields": [
+        "matches",
+        "returned",
+        "truncated",
+        "limit",
+        "next_cursor",
+        "snapshot_truncated",
+        "diagnostics"
+      ]
+    },
+    {
+      "name": "find_code_by_rule",
+      "family": "structural",
+      "visibility": "baseline",
+      "tags": [
+        "structural",
+        "read-only"
+      ],
+      "annotations": {
+        "read_only": true,
+        "destructive": false,
+        "idempotent": true,
+        "open_world": false
+      },
+      "timeout_seconds": 30,
+      "required_inputs": [
+        "project_folder",
+        "yaml"
+      ],
+      "optional_inputs": {
+        "paths": null,
+        "include_globs": null,
+        "exclude_globs": null,
+        "max_results": null,
+        "include_metadata": false,
+        "positive_code": null,
+        "negative_code": null,
+        "text_equals": null,
+        "text_starts_with": null,
+        "text_contains": null,
+        "cursor": null,
+        "output_format": "text"
+      },
+      "output_fields": [
+        "matches",
+        "returned",
+        "truncated",
+        "limit",
+        "next_cursor",
+        "snapshot_truncated",
+        "diagnostics"
+      ]
+    },
+    {
+      "name": "get_server_info",
+      "family": "runtime",
+      "visibility": "baseline",
+      "tags": [
+        "runtime",
+        "read-only"
+      ],
+      "annotations": {
+        "read_only": true,
+        "destructive": false,
+        "idempotent": true,
+        "open_world": false
+      },
+      "timeout_seconds": 30,
+      "required_inputs": [],
+      "optional_inputs": {},
+      "output_fields": [
+        "server",
+        "versions",
+        "executables",
+        "allowed_roots",
+        "capabilities",
+        "limits",
+        "coordinates",
+        "configuration"
+      ]
+    },
+    {
+      "name": "oxc_modules",
+      "family": "oxc",
+      "visibility": "oxc",
+      "tags": [
+        "oxc",
+        "analysis",
+        "read-only"
+      ],
+      "annotations": {
+        "read_only": true,
+        "destructive": false,
+        "idempotent": true,
+        "open_world": false
+      },
+      "timeout_seconds": 30,
+      "required_inputs": [
+        "project_folder"
+      ],
+      "optional_inputs": {
+        "paths": null,
+        "include_globs": null,
+        "exclude_globs": null,
+        "strict_paths": false,
+        "include_dynamic": false,
+        "max_results": null,
+        "cursor": null,
+        "output_format": "text"
+      },
+      "output_fields": [
+        "modules",
+        "returned",
+        "truncated",
+        "limit",
+        "next_cursor",
+        "snapshot_truncated",
+        "source_digest",
+        "diagnostics"
+      ]
+    },
+    {
+      "name": "oxc_transform",
+      "family": "oxc",
+      "visibility": "oxc",
+      "tags": [
+        "oxc",
+        "transform",
+        "preview",
+        "read-only"
+      ],
+      "annotations": {
+        "read_only": true,
+        "destructive": false,
+        "idempotent": true,
+        "open_world": false
+      },
+      "timeout_seconds": 30,
+      "required_inputs": [
+        "source"
+      ],
+      "optional_inputs": {
+        "options": null,
+        "output_format": "text"
+      },
+      "output_fields": [
+        "filename",
+        "code",
+        "source_map",
+        "declaration",
+        "declaration_map",
+        "helpers_used",
+        "source_digest",
+        "diagnostics"
+      ]
+    },
+    {
+      "name": "oxc_transform_files",
+      "family": "oxc",
+      "visibility": "oxc",
+      "tags": [
+        "oxc",
+        "transform",
+        "mutation"
+      ],
+      "annotations": {
+        "read_only": false,
+        "destructive": true,
+        "idempotent": true,
+        "open_world": false
+      },
+      "timeout_seconds": 120,
+      "required_inputs": [
+        "project_folder",
+        "output_root"
+      ],
+      "optional_inputs": {
+        "paths": null,
+        "include_globs": null,
+        "exclude_globs": null,
+        "strict_paths": true,
+        "conflict_policy": "error",
+        "allow_source_overwrite": false,
+        "options": null,
+        "max_results": null
+      },
+      "output_fields": [
+        "emitted_files",
+        "skipped_files",
+        "overwritten_files",
+        "failed_files",
+        "artifacts",
+        "diagnostics"
+      ]
+    },
+    {
+      "name": "oxc_minify",
+      "family": "oxc",
+      "visibility": "oxc",
+      "tags": [
+        "oxc",
+        "minify",
+        "preview",
+        "read-only"
+      ],
+      "annotations": {
+        "read_only": true,
+        "destructive": false,
+        "idempotent": true,
+        "open_world": false
+      },
+      "timeout_seconds": 30,
+      "required_inputs": [
+        "source"
+      ],
+      "optional_inputs": {
+        "options": null,
+        "output_format": "text"
+      },
+      "output_fields": [
+        "filename",
+        "code",
+        "source_map",
+        "legal_comments",
+        "mangle_cache",
+        "source_digest",
+        "diagnostics",
+        "assumptions"
+      ]
+    },
+    {
+      "name": "oxc_minify_files",
+      "family": "oxc",
+      "visibility": "oxc",
+      "tags": [
+        "oxc",
+        "minify",
+        "mutation"
+      ],
+      "annotations": {
+        "read_only": false,
+        "destructive": true,
+        "idempotent": true,
+        "open_world": false
+      },
+      "timeout_seconds": 120,
+      "required_inputs": [
+        "project_folder",
+        "output_root"
+      ],
+      "optional_inputs": {
+        "paths": null,
+        "include_globs": null,
+        "exclude_globs": null,
+        "strict_paths": true,
+        "conflict_policy": "error",
+        "allow_source_overwrite": false,
+        "options": null,
+        "max_results": null
+      },
+      "output_fields": [
+        "emitted_files",
+        "skipped_files",
+        "overwritten_files",
+        "failed_files",
+        "artifacts",
+        "legal_comments",
+        "diagnostics",
+        "assumptions"
+      ]
+    },
+    {
+      "name": "semantic_scopes",
+      "family": "semantic",
+      "visibility": "semantic",
+      "tags": [
+        "semantic",
+        "scope",
+        "read-only"
+      ],
+      "annotations": {
+        "read_only": true,
+        "destructive": false,
+        "idempotent": true,
+        "open_world": false
+      },
+      "timeout_seconds": 60,
+      "required_inputs": [
+        "project_folder",
+        "path"
+      ],
+      "optional_inputs": {
+        "source_digest": null,
+        "max_results": null,
+        "cursor": null,
+        "output_format": "text"
+      },
+      "output_fields": [
+        "file",
+        "source_digest",
+        "scopes",
+        "returned",
+        "truncated",
+        "limit",
+        "next_cursor",
+        "diagnostics"
+      ]
+    },
+    {
+      "name": "semantic_symbols",
+      "family": "semantic",
+      "visibility": "semantic",
+      "tags": [
+        "semantic",
+        "symbol",
+        "read-only"
+      ],
+      "annotations": {
+        "read_only": true,
+        "destructive": false,
+        "idempotent": true,
+        "open_world": false
+      },
+      "timeout_seconds": 60,
+      "required_inputs": [
+        "project_folder",
+        "path"
+      ],
+      "optional_inputs": {
+        "source_digest": null,
+        "max_results": null,
+        "cursor": null,
+        "output_format": "text"
+      },
+      "output_fields": [
+        "file",
+        "source_digest",
+        "symbols",
+        "returned",
+        "truncated",
+        "limit",
+        "next_cursor",
+        "diagnostics"
+      ]
+    },
+    {
+      "name": "semantic_references",
+      "family": "semantic",
+      "visibility": "semantic",
+      "tags": [
+        "semantic",
+        "reference",
+        "read-only"
+      ],
+      "annotations": {
+        "read_only": true,
+        "destructive": false,
+        "idempotent": true,
+        "open_world": false
+      },
+      "timeout_seconds": 90,
+      "required_inputs": [
+        "project_folder",
+        "path",
+        "position"
+      ],
+      "optional_inputs": {
+        "source_digest": null,
+        "include_declaration": true,
+        "include_unresolved": false,
+        "project_paths": null,
+        "include_globs": null,
+        "exclude_globs": null,
+        "max_results": null,
+        "cursor": null,
+        "output_format": "text"
+      },
+      "output_fields": [
+        "target",
+        "source_digest",
+        "coverage",
+        "references",
+        "unresolved",
+        "returned",
+        "truncated",
+        "limit",
+        "next_cursor",
+        "diagnostics"
+      ]
+    },
+    {
+      "name": "semantic_cfg",
+      "family": "semantic",
+      "visibility": "semantic",
+      "tags": [
+        "semantic",
+        "cfg",
+        "read-only"
+      ],
+      "annotations": {
+        "read_only": true,
+        "destructive": false,
+        "idempotent": true,
+        "open_world": false
+      },
+      "timeout_seconds": 90,
+      "required_inputs": [
+        "project_folder",
+        "path"
+      ],
+      "optional_inputs": {
+        "source_digest": null,
+        "function_position": null,
+        "max_results": null,
+        "cursor": null,
+        "output_format": "text"
+      },
+      "output_fields": [
+        "file",
+        "source_digest",
+        "functions",
+        "returned",
+        "truncated",
+        "limit",
+        "next_cursor",
+        "diagnostics"
+      ]
+    },
+    {
+      "name": "scan_project_rules",
+      "family": "structural",
+      "visibility": "configured",
+      "tags": [
+        "structural",
+        "configured",
+        "read-only"
+      ],
+      "annotations": {
+        "read_only": true,
+        "destructive": false,
+        "idempotent": true,
+        "open_world": false
+      },
+      "timeout_seconds": 30,
+      "required_inputs": [
+        "project_folder"
+      ],
+      "optional_inputs": {
+        "rule_ids": null,
+        "paths": null,
+        "include_globs": null,
+        "exclude_globs": null,
+        "max_results": null,
+        "include_metadata": true,
+        "run_tests_first": false,
+        "cursor": null,
+        "output_format": "text"
+      },
+      "output_fields": [
+        "matches",
+        "returned",
+        "truncated",
+        "limit",
+        "next_cursor",
+        "snapshot_truncated",
+        "diagnostics"
+      ]
+    },
+    {
+      "name": "test_project_rules",
+      "family": "structural",
+      "visibility": "configured",
+      "tags": [
+        "structural",
+        "configured",
+        "read-only"
+      ],
+      "annotations": {
+        "read_only": true,
+        "destructive": false,
+        "idempotent": true,
+        "open_world": false
+      },
+      "timeout_seconds": 30,
+      "required_inputs": [],
+      "optional_inputs": {
+        "rule_ids": null
+      },
+      "output_fields": [
+        "passed",
+        "report",
+        "report_truncated"
+      ]
+    },
+    {
+      "name": "inspect_typescript_project",
+      "family": "typescript-compiler",
+      "visibility": "typescript_compiler",
+      "tags": [
+        "typescript",
+        "compiler",
+        "analysis",
+        "read-only"
+      ],
+      "annotations": {
+        "read_only": true,
+        "destructive": false,
+        "idempotent": true,
+        "open_world": false
+      },
+      "timeout_seconds": 120,
+      "required_inputs": [
+        "project_folder"
+      ],
+      "optional_inputs": {
+        "tsconfig": "tsconfig.json",
+        "paths": null,
+        "include_emit": true,
+        "include_code_actions": true,
+        "max_results": null
+      },
+      "output_fields": [
+        "typescript_version",
+        "tsconfig",
+        "root_files",
+        "options",
+        "diagnostics",
+        "modules",
+        "symbols",
+        "inferred_types",
+        "emit",
+        "code_actions",
+        "source_digest",
+        "returned",
+        "truncated",
+        "limit"
+      ]
+    },
+    {
+      "name": "postgres_parse",
+      "family": "postgresql",
+      "visibility": "postgresql",
+      "tags": [
+        "postgresql",
+        "parser",
+        "analysis",
+        "read-only"
+      ],
+      "annotations": {
+        "read_only": true,
+        "destructive": false,
+        "idempotent": true,
+        "open_world": false
+      },
+      "timeout_seconds": 30,
+      "required_inputs": [
+        "sql"
+      ],
+      "optional_inputs": {
+        "mode": "parse"
+      },
+      "output_fields": [
+        "parser_version",
+        "deparser_version",
+        "postgres_major",
+        "mode",
+        "source_digest",
+        "tree",
+        "tokens",
+        "fingerprint",
+        "normalized",
+        "plpgsql",
+        "statements",
+        "declarations",
+        "references",
+        "calls",
+        "diagnostics",
+        "returned",
+        "truncated",
+        "limit"
+      ]
+    },
+    {
+      "name": "postgres_parse_files",
+      "family": "postgresql",
+      "visibility": "postgresql",
+      "tags": [
+        "postgresql",
+        "parser",
+        "analysis",
+        "read-only"
+      ],
+      "annotations": {
+        "read_only": true,
+        "destructive": false,
+        "idempotent": true,
+        "open_world": false
+      },
+      "timeout_seconds": 90,
+      "required_inputs": [
+        "project_folder"
+      ],
+      "optional_inputs": {
+        "paths": null,
+        "include_globs": null,
+        "exclude_globs": null,
+        "strict_paths": true,
+        "mode": "parse",
+        "max_results": null,
+        "cursor": null
+      },
+      "output_fields": [
+        "files",
+        "returned",
+        "truncated",
+        "limit",
+        "next_cursor",
+        "snapshot_truncated"
+      ]
+    },
+    {
+      "name": "postgres_deparse_preview",
+      "family": "postgresql",
+      "visibility": "postgresql",
+      "tags": [
+        "postgresql",
+        "deparse",
+        "preview",
+        "read-only"
+      ],
+      "annotations": {
+        "read_only": true,
+        "destructive": false,
+        "idempotent": true,
+        "open_world": false
+      },
+      "timeout_seconds": 30,
+      "required_inputs": [
+        "sql"
+      ],
+      "optional_inputs": {},
+      "output_fields": [
+        "parser_version",
+        "deparser_version",
+        "postgres_major",
+        "mode",
+        "source_digest",
+        "original_sql",
+        "deparsed_sql",
+        "equivalent",
+        "original_tree_digest",
+        "reparsed_tree_digest",
+        "diagnostics"
+      ]
+    },
+    {
+      "name": "typescript_execute",
+      "family": "typescript",
+      "visibility": "all",
+      "tags": [
+        "typescript",
+        "execution",
+        "unsafe"
+      ],
+      "annotations": {
+        "read_only": false,
+        "destructive": true,
+        "idempotent": false,
+        "open_world": true
+      },
+      "timeout_seconds": 120,
+      "required_inputs": [
+        "project_folder",
+        "entry"
+      ],
+      "optional_inputs": {
+        "args": [],
+        "stdin": null,
+        "timeout_seconds": 30,
+        "output_format": "text"
+      },
+      "output_fields": [
+        "profile",
+        "exit_code",
+        "signal",
+        "stdout",
+        "stderr",
+        "timed_out",
+        "stdout_truncated",
+        "stderr_truncated",
+        "duration_ms",
+        "written_files",
+        "audit"
+      ]
+    }
+  ],
+  "generated": {
+    "tool_fingerprints": {
+      "dump_syntax_tree": "0abf14a60bad15ffc4e66f0d96d0777080121b140328be52ddaab64ec49bcf3e",
+      "find_code": "15edadb4263b432007d31fce25c74ba98225558e5358035e8ac994c45b86052f",
+      "find_code_by_rule": "0d940531d671f646d06e30c9e0cf4df09feb986c06917351bbe77af8289d4c17",
+      "get_server_info": "5f4bd8eca5e98f2a72123c5da67606851e2b6e32da0e21589fda63e664548f25",
+      "inspect_typescript_project": "3708966cd6fc326648e3ec5dec7eb933ff813070d8eb5187a3f37e7128ff9c5e",
+      "outline_code": "1330695001d039c9bdc3d09489e685e0361d4977ed5e028dcd4f7307b778ce26",
+      "oxc_minify": "1be404671881c77400d922cc09835e149de116d169409524297192f0bee0d6b8",
+      "oxc_minify_files": "7f6909adb05a098a88c82bbf9e1ef7cc9cf2ce50bbf10f66750ed5039979fbbf",
+      "oxc_modules": "5bd3de8dad43864a12776a7fc6abd9c02aad3e704bca686f4624aa6f2dc6aa07",
+      "oxc_transform": "9d76414977d11bc0840a5326fd1ae3492b358de525da3c644dc67c191ffd2ac5",
+      "oxc_transform_files": "899767fb10a1a68f840746a90b46315e4287787d01f62a953a3e59fa9251879f",
+      "postgres_deparse_preview": "391878f2a57da0b460e095aa89e622ba0333a61a9c0d667f4b3ce4204d2908ff",
+      "postgres_parse": "ed3868eacee76abb678686cdc957cb3bc50467587725c658a8b7e4858b7e6b09",
+      "postgres_parse_files": "f8433a85127fe443454d3f96bc51e75b885d6e29b119a94562ba6a50859fa856",
+      "scan_project_rules": "5e5e056a7c56c8a52e81465abd37b894af5091a0bc2c519fcdf62bb664075dd4",
+      "semantic_cfg": "01b06af9fa08c69b0c160bbfe0cb16222b30172406be2a538a6d0647d55284fb",
+      "semantic_references": "d2bc36ec8cfe8e14a78b067796fe0a6c116d4d05d99c6fefdd7299408cb288fb",
+      "semantic_scopes": "1596c9725e103559f66cb12da5d487b317caae9f177ebfa698c1716226e26b4e",
+      "semantic_symbols": "ccdb974c3dc9df68d6b2bd5be27dcaef7e7acbfcae2a6dc471f52de4b1de7973",
+      "test_match_code_rule": "f24a20577c68463e73050637609edb01cf6a1a45f0ec5172e57fba06d31f76c7",
+      "test_project_rules": "2a10db03bbc322921904d2a627882e9460e02f1f7c30883786b2b87221beef38",
+      "typescript_execute": "2f63f46d5198c9e2f7beb4cbba9299e53e92f024f8b8a8f486309bdeeb5f6464"
+    },
+    "profile_fingerprints": {
+      "baseline": "677f8b1835631b4701c8fdd0fa0dfcc856d030ecbe899fdabc082f8285bbbe98",
+      "oxc": "585e2ba6a2fb73dfd08c2fd97b179285fa13d66a7280c173a0001075c2a572a5",
+      "semantic": "1084a61d670d9b7af654c9200ad1548b1993fe527a282425d7f036d873ca5012",
+      "configured": "8becfcb6eaa2764f1bd46759e3e5cebafcca622c63b3623f2250787de4cde25e",
+      "typescript_compiler": "796c957072bf8282c1eb1e3e7d1a1f719c9ece6cc711402cbe097a9053c47c19",
+      "postgresql": "4671ca1b735000bf1a8df014dfba8198175f556d3c064f657ec0a415d60310f3",
+      "all": "6e5100c034e681d809f6df3746a8d9d5ebd0a6b975c47c9ed52af3ba12bebffc"
+    }
+  }
+}

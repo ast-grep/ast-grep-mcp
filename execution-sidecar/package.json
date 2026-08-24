@@ -1,0 +1,12 @@
+{
+  "name": "ast-soleaux-typescript-execution-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "dependencies": {
+    "@oxc-node/core": "0.1.0"
+  }
+}

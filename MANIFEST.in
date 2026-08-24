@@ -1,6 +1,25 @@
 include AGENTS.md
+include CLAUDE.md
 include ast-grep.mdc
 include uv.lock
 include .python-version
+recursive-include .codex/rules *.rules
+recursive-include .claude/rules *.md
 recursive-include scripts *.py
-recursive-include tests *.py *.yml
+recursive-include ast_soleaux *.py
+recursive-include execution-sidecar *.py
+include analysis-sidecar/Cargo.toml
+include analysis-sidecar/Cargo.lock
+include analysis-sidecar/rust-toolchain.toml
+recursive-include analysis-sidecar/src *.rs
+recursive-include analysis-sidecar/tests *.rs
+include postgresql-sidecar/package.json
+include postgresql-sidecar/package-lock.json
+recursive-include postgresql-sidecar/bin *.mjs
+recursive-include postgresql-sidecar/test *.mjs
+include oxc-sidecar/package.json
+include oxc-sidecar/package-lock.json
+include oxc-sidecar/.oxfmtrc.json
+recursive-include oxc-sidecar/bin *.mjs
+recursive-include oxc-sidecar/test *.mjs
+recursive-include tests *.py *.yml *.js *.ts *.json

@@ -10,7 +10,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import mkdtemp
-from typing import Any, Final, cast
+from typing import Final, TypedDict, cast
 
 import yaml
 from yaml.events import (
@@ -32,7 +32,7 @@ MAX_YAML_DOCUMENTS: Final = 64
 MAX_YAML_NODES: Final = 10_000
 MAX_YAML_DEPTH: Final = 64
 MAX_SNAPSHOT_YAML_NODES: Final = 200_000
-RUNTIME_DIRECTORY_NAME: Final = ".project-sast-runtime"
+RUNTIME_DIRECTORY_NAME: Final = ".ast-soleaux-runtime"
 
 _CONFIG_KEYS: Final = frozenset({"ruleDirs", "testConfigs", "utilDirs", "customLanguages", "languageGlobs", "languageInjections"})
 _TEST_CONFIG_KEYS: Final = frozenset({"testDir", "snapshotDir"})
@@ -92,19 +92,19 @@ def _is_link_like(metadata: os.stat_result) -> bool:
     return bool(reparse_point and getattr(metadata, "st_file_attributes", 0) & reparse_point)
 
 
-def _mapping(value: object, *, label: str) -> dict[str, Any]:
+def _mapping(value: object, *, label: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ValueError(f"{label} must be a mapping")
     raw = cast(dict[object, object], value)
     if any(not isinstance(key, str) for key in raw):
         raise ValueError(f"{label} must use string keys")
-    return cast(dict[str, Any], value)
+    return {key: item for key, item in raw.items() if isinstance(key, str)}
 
 
-def _list(value: object, *, label: str) -> list[Any]:
+def _list(value: object, *, label: str) -> list[object]:
     if not isinstance(value, list):
         raise ValueError(f"{label} must be a list")
-    return cast(list[Any], value)
+    return list(cast(list[object], value))
 
 
 def _string_list(value: object, *, label: str, allow_empty: bool = True) -> list[str]:
@@ -114,7 +114,7 @@ def _string_list(value: object, *, label: str, allow_empty: bool = True) -> list
     return cast(list[str], values)
 
 
-def _reject_unknown_keys(value: Mapping[str, Any], allowed: frozenset[str], *, label: str) -> None:
+def _reject_unknown_keys(value: Mapping[str, object], allowed: frozenset[str], *, label: str) -> None:
     unknown = sorted(set(value) - allowed)
     if unknown:
         raise ValueError(f"{label} contains unknown ast-grep 0.45 keys: {', '.join(unknown)}")
@@ -152,8 +152,8 @@ def load_strict_yaml_documents(
     max_documents: int = MAX_YAML_DOCUMENTS,
 ) -> list[object]:
     try:
-        yaml_api = cast(Any, yaml)
-        parse_yaml = cast(Callable[..., Iterable[Event]], yaml_api.parse)
+        parse_member = "parse"
+        parse_yaml = cast(Callable[..., Iterable[Event]], getattr(yaml, parse_member))
         events = parse_yaml(source, Loader=yaml.SafeLoader)
         depth = 0
         documents = 0
@@ -179,10 +179,8 @@ def load_strict_yaml_documents(
                     raise ValueError(f"{label} exceeds the {MAX_YAML_DEPTH}-level YAML depth limit")
             elif isinstance(event, CollectionEndEvent):
                 depth -= 1
-        compose_yaml = cast(
-            Callable[..., Iterable[Node | None]],
-            yaml_api.compose_all,
-        )
+        compose_member = "compose_all"
+        compose_yaml = cast(Callable[..., Iterable[Node | None]], getattr(yaml, compose_member))
         composed = list(compose_yaml(source, Loader=yaml.SafeLoader))
         if len(composed) > max_documents:
             raise ValueError(f"{label} exceeds the {max_documents}-document YAML limit")
@@ -427,17 +425,17 @@ class _BundleWriter:
         return self._digest.hexdigest()
 
 
-def _yaml_bytes(value: Mapping[str, Any]) -> bytes:
+def _yaml_bytes(value: Mapping[str, object]) -> bytes:
     return yaml.safe_dump(dict(value), sort_keys=False, allow_unicode=True).encode("utf-8")
 
 
-def _iter_yaml_documents(documents: Sequence[object], *, label: str) -> list[dict[str, Any]]:
-    flattened: list[dict[str, Any]] = []
+def _iter_yaml_documents(documents: Sequence[object], *, label: str) -> list[dict[str, object]]:
+    flattened: list[dict[str, object]] = []
     for document in documents:
         if document is None:
             continue
         if isinstance(document, list):
-            values = cast(list[object], document)
+            values = list(cast(list[object], document))
         else:
             values = [document]
         for value in values:
@@ -448,7 +446,7 @@ def _iter_yaml_documents(documents: Sequence[object], *, label: str) -> list[dic
 def _matches_dependencies(rule: object, *, shadowed: frozenset[str] = frozenset()) -> set[str]:
     if not isinstance(rule, dict):
         return set()
-    mapping = cast(dict[str, Any], rule)
+    mapping = _mapping(cast(object, rule), label="utility rule")
     dependencies: set[str] = set()
     matches = mapping.get("matches")
     if isinstance(matches, str) and matches not in shadowed:
@@ -475,7 +473,7 @@ def _reject_zero_progress_cycles(definitions: Mapping[str, object], *, label: st
     for name, definition in definitions.items():
         if not isinstance(definition, dict):
             continue
-        mapping = cast(dict[str, Any], definition)
+        mapping = _mapping(cast(object, definition), label=f"{label} {name!r}")
         arguments = _string_list(mapping.get("arguments", []), label=f"{label} {name!r} arguments", allow_empty=False)
         if len(arguments) != len(set(arguments)):
             raise ValueError(f"{label} {name!r} arguments must be unique")
@@ -510,7 +508,7 @@ def _reject_zero_progress_cycles(definitions: Mapping[str, object], *, label: st
                 pending.append((dependency, iter(dependencies.get(dependency, set()))))
 
 
-def _as_cycle_definition(value: object) -> dict[str, Any]:
+def _as_cycle_definition(value: object) -> dict[str, object]:
     """Present a utility entry in the shape the cycle detector reads.
 
     A local utility value is the rule object itself, so it is wrapped under
@@ -519,16 +517,15 @@ def _as_cycle_definition(value: object) -> dict[str, Any]:
     calls inside, letting mutually recursive definitions pass unnoticed.
     """
     if isinstance(value, dict) and "arguments" in value and "rule" in value:
-        return cast(dict[str, Any], value)
+        return _mapping(cast(object, value), label="utility definition")
     return {"rule": value}
 
 
-def _validate_local_utility_cycles(rule: Mapping[str, Any], *, label: str) -> None:
+def _validate_local_utility_cycles(rule: Mapping[str, object], *, label: str) -> None:
     utils = rule.get("utils")
     if isinstance(utils, dict):
-        definitions = {
-            name: _as_cycle_definition(value) for name, value in cast(dict[object, object], utils).items() if isinstance(name, str)
-        }
+        raw_utils = cast(dict[object, object], utils)
+        definitions = {name: _as_cycle_definition(value) for name, value in raw_utils.items() if isinstance(name, str)}
         _reject_zero_progress_cycles(definitions, label=label)
 
 
@@ -550,7 +547,7 @@ def _copy_directory(
     destination: Path,
     writer: _BundleWriter,
     yaml_only: bool,
-    yaml_documents: list[tuple[str, list[dict[str, Any]]]],
+    yaml_documents: list[tuple[str, list[dict[str, object]]]],
     boundary: Path,
     budget: _NodeBudget,
 ) -> None:
@@ -618,7 +615,7 @@ def _copy_directory_descriptor(
     destination: Path,
     writer: _BundleWriter,
     yaml_only: bool,
-    yaml_documents: list[tuple[str, list[dict[str, Any]]]],
+    yaml_documents: list[tuple[str, list[dict[str, object]]]],
     depth: int,
     budget: _NodeBudget,
 ) -> None:
@@ -719,6 +716,16 @@ def _target_triples() -> tuple[str, ...]:
     raise ValueError(f"Unsupported native-parser platform: {system}")
 
 
+class ConfigProvenance(TypedDict, total=False):
+    source: str | None
+    source_sha256: str | None
+    snapshot: str
+    resource_files: int
+    resource_bytes: int
+    configured_rule_ids: list[str]
+    native_library_sha256: dict[str, str]
+
+
 @dataclass
 class ConfigSnapshot:
     source_path: Path | None
@@ -727,7 +734,7 @@ class ConfigSnapshot:
     project_config_path: Path
     test_config_path: Path
     digest: str
-    provenance: dict[str, Any]
+    provenance: ConfigProvenance
     configured_rule_ids: tuple[str, ...]
     capabilities: dict[str, bool]
     native_library_hashes: dict[str, str]
@@ -808,7 +815,7 @@ def create_config_snapshot(
     writer = _BundleWriter(bundle_root)
     source_path: Path | None = None
     source_digest: str | None = None
-    config: dict[str, Any] = {"ruleDirs": []}
+    config: dict[str, object] = {"ruleDirs": []}
     config_directory = working_directory
 
     try:
@@ -856,8 +863,8 @@ def create_config_snapshot(
         util_dirs = _string_list(config.get("utilDirs", []), label="sgconfig.yml utilDirs", allow_empty=False)
         copied_rule_dirs: list[str] = []
         copied_util_dirs: list[str] = []
-        rule_documents: list[tuple[str, list[dict[str, Any]]]] = []
-        util_documents: list[tuple[str, list[dict[str, Any]]]] = []
+        rule_documents: list[tuple[str, list[dict[str, object]]]] = []
+        util_documents: list[tuple[str, list[dict[str, object]]]] = []
 
         for index, raw_dir in enumerate(rule_dirs):
             source = _secure_existing_path(
@@ -932,7 +939,7 @@ def create_config_snapshot(
 
         test_configs_value = config.get("testConfigs", [])
         test_configs = _list(test_configs_value, label="sgconfig.yml testConfigs")
-        copied_test_configs: list[dict[str, Any]] = []
+        copied_test_configs: list[dict[str, object]] = []
         for index, value in enumerate(test_configs):
             test = _mapping(value, label=f"sgconfig.yml testConfigs[{index}]")
             _reject_unknown_keys(test, _TEST_CONFIG_KEYS, label=f"sgconfig.yml testConfigs[{index}]")
@@ -949,7 +956,7 @@ def create_config_snapshot(
                 boundary=config_directory,
             )
             destination = Path(f"resources/tests/{index}")
-            ignored_documents: list[tuple[str, list[dict[str, Any]]]] = []
+            ignored_documents: list[tuple[str, list[dict[str, object]]]] = []
             _copy_directory(
                 source,
                 destination=destination,
@@ -959,7 +966,7 @@ def create_config_snapshot(
                 boundary=config_directory,
                 budget=node_budget,
             )
-            copied_test: dict[str, Any] = {"testDir": destination.as_posix()}
+            copied_test: dict[str, object] = {"testDir": destination.as_posix()}
             snapshot_dir = test.get("snapshotDir")
             if snapshot_dir is not None:
                 if (
@@ -977,7 +984,7 @@ def create_config_snapshot(
                 copied_test["snapshotDir"] = snapshot_dir
             copied_test_configs.append(copied_test)
 
-        language_globs: dict[str, Any] | None = None
+        language_globs: dict[str, object] | None = None
         if "languageGlobs" in config:
             language_globs = _mapping(config["languageGlobs"], label="sgconfig.yml languageGlobs")
             for language, globs in language_globs.items():
@@ -985,7 +992,7 @@ def create_config_snapshot(
                     raise ValueError("sgconfig.yml languageGlobs contains an invalid language name")
                 _string_list(globs, label=f"sgconfig.yml languageGlobs.{language}", allow_empty=False)
 
-        injections: list[Any] = []
+        injections: list[object] = []
         if "languageInjections" in config:
             injections = _list(config["languageInjections"], label="sgconfig.yml languageInjections")
             for index, value in enumerate(injections):
@@ -1018,7 +1025,7 @@ def create_config_snapshot(
 
         native_hashes: dict[str, str] = {}
         used_trusted: set[Path] = set()
-        copied_custom_languages: dict[str, Any] = {}
+        copied_custom_languages: dict[str, object] = {}
         normalized_language_names: dict[str, str] = {}
         if "customLanguages" in config:
             custom_languages = _mapping(config["customLanguages"], label="sgconfig.yml customLanguages")
@@ -1080,7 +1087,7 @@ def create_config_snapshot(
                 writer.add(library_destination, library_payload)
                 native_hashes[name] = actual_digest
 
-                copied_custom: dict[str, Any] = {
+                copied_custom: dict[str, object] = {
                     "libraryPath": library_destination.as_posix(),
                     "extensions": extensions,
                 }
@@ -1119,7 +1126,7 @@ def create_config_snapshot(
         if unused_trusted:
             raise ValueError(f"Trusted native libraries are not referenced by sgconfig.yml: {', '.join(unused_trusted)}")
 
-        language_configuration: dict[str, Any] = {}
+        language_configuration: dict[str, object] = {}
         if copied_custom_languages:
             language_configuration["customLanguages"] = copied_custom_languages
         if language_globs is not None:
@@ -1127,13 +1134,13 @@ def create_config_snapshot(
         if injections:
             language_configuration["languageInjections"] = injections
 
-        inline_config: dict[str, Any] = {"ruleDirs": [], **language_configuration}
-        project_config: dict[str, Any] = {
+        inline_config: dict[str, object] = {"ruleDirs": [], **language_configuration}
+        project_config: dict[str, object] = {
             "ruleDirs": copied_rule_dirs,
             **({"utilDirs": copied_util_dirs} if copied_util_dirs else {}),
             **language_configuration,
         }
-        test_config: dict[str, Any] = {
+        test_config: dict[str, object] = {
             "ruleDirs": copied_rule_dirs,
             **({"utilDirs": copied_util_dirs} if copied_util_dirs else {}),
             **({"testConfigs": copied_test_configs} if copied_test_configs else {}),
@@ -1157,7 +1164,7 @@ def create_config_snapshot(
             "configured_tests": bool(copied_test_configs),
             "custom_languages": bool(copied_custom_languages),
         }
-        provenance: dict[str, Any] = {
+        provenance: ConfigProvenance = {
             "source": str(source_path) if source_path is not None else None,
             "source_sha256": source_digest,
             "snapshot": "private-read-only",

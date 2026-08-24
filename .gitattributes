@@ -1,6 +1,7 @@
 * text=auto
 
 *.py text eol=lf
+*.mjs text eol=lf
 *.yml text eol=lf
 *.toml text eol=lf
 *.md text eol=lf

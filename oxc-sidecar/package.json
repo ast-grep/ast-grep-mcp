@@ -1,0 +1,30 @@
+{
+  "name": "ast-soleaux-oxc-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "bin": {
+    "ast-soleaux-oxc": "bin/ast-soleaux-oxc.mjs",
+    "ast-soleaux-typescript-project": "bin/ast-soleaux-typescript-project.mjs"
+  },
+  "type": "module",
+  "scripts": {
+    "format": "oxfmt --write bin test",
+    "format:check": "oxfmt --check bin test",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@oxc-node/core": "0.1.0",
+    "oxc-minify": "0.147.0",
+    "oxc-parser": "0.147.0",
+    "oxc-resolver": "11.24.2",
+    "oxc-transform": "0.147.0",
+    "typescript": "6.0.2"
+  },
+  "devDependencies": {
+    "oxfmt": "0.65.0"
+  },
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  }
+}

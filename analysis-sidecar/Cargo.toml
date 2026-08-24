@@ -1,0 +1,19 @@
+[package]
+name = "ast-soleaux-analysis"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+hex = "0.4.3"
+oxc_allocator = "=0.147.0"
+oxc_cfg = "=0.147.0"
+oxc_parser = "=0.147.0"
+oxc_resolver = "=11.24.2"
+oxc_semantic = { version = "=0.147.0", features = ["cfg"] }
+oxc_span = "=0.147.0"
+oxc_syntax = "=0.147.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sha2 = "0.10.9"

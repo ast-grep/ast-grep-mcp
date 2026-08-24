@@ -1,5 +1,5 @@
 ---
-description: Write, test, and run ast-grep structural-search rules with ProjectSAST
+description: Write, test, and run ast-grep structural-search rules with ast-soleaux
 globs:
 alwaysApply: false
 ---
@@ -12,23 +12,23 @@ Use this guidance to translate a natural-language code query into an ast-grep pa
 
 This file synchronizes the official [ast-grep agent skill](https://github.com/ast-grep/agent-skill) and its rule reference at revision `c2a9bc154f4ffe08b25d28d5e852dfac8c0d0d8a`, retrieved 2026-08-03.
 
-Repository `AGENTS.md` instructions and working agreements are authoritative. In particular, inspect files, run tools, probe the installed ast-grep 0.45.0 binary, and resolve discoverable facts before presenting a result. Do not ask a user for information that repository or tool inspection can determine.
+The root `AGENTS.md` is the shared cross-agent contract: Codex discovers it directly, while Claude Code consumes it through the `CLAUDE.md` import. Independently authored, applicable Claude project rules add native scoped guidance; `.codex/rules/` contains only Codex command-execution policy. In particular, inspect files, run tools, probe the installed ast-grep 0.45.0 binary, and resolve discoverable facts before presenting a result. Do not ask a user for information that repository or tool inspection can determine.
 
-ProjectSAST is read-only. Rewrites and rule fixes may be previewed, but no MCP tool applies them.
+ast-soleaux structural-search tools are read-only. Rewrites and rule fixes may be previewed, but structural tools never apply them.
 
 ## Workflow
 
 1. Determine the target language, code structure, intended scope, and inclusions or exclusions from repository evidence and the request.
 2. Create minimal positive and negative snippets that cover the requested behavior.
 3. Start with the simplest structural pattern or rule that can express the query.
-4. Use `dump_syntax_tree` to inspect `cst`, `ast`, `pattern`, or `sexp` output when node kinds or pattern parsing are uncertain.
-5. Use `test_match_code_rule` to validate a YAML rule against the snippets.
-6. Simplify a failing rule, verify each part, and then rebuild composite or relational constraints.
-7. Search with `find_code` for a pattern or `find_code_by_rule` for inline YAML.
+4. Call `find_code` directly for a pattern; parse failures return a syntax diagnostic without a separate dump call.
+5. Call `find_code_by_rule` with `positive_code` and `negative_code` so rule validation and project search complete in one call.
+6. Use `dump_syntax_tree` only when node kinds or pattern parsing remain uncertain after the structured diagnostic.
+7. Simplify a failing rule, verify each part, and then rebuild composite or relational constraints.
 8. Use `scan_project_rules` only for rules retained from the startup configuration.
 9. Verify representative returned matches and report the actual bounded result envelope.
 
-Use `outline_code` before a broad search when repository structure or symbol names are unknown. Use `get_server_info` when the effective roots, configuration, capabilities, coordinate conventions, or limits matter.
+Use `outline_code` with canonical exact paths or bounded `include_globs` before a broad search when repository structure or symbol names are unknown. Never guess paths; inspect `resolved_paths` and `path_errors`. For contained JavaScript or TypeScript dependency edges, use `oxc_modules` only when `get_server_info.capabilities.javascript_module_inspection` is true. Use `get_server_info` before choosing an uncertain language or when roots, configuration, capabilities, coordinates, or limits matter.
 
 ## Choosing an interface
 
@@ -39,11 +39,16 @@ Use `outline_code` before a broad search when repository structure or symbol nam
 | Discover symbols in explicit files | `outline_code` |
 | Search with one structural pattern | `find_code` |
 | Search with one or more inline YAML rules | `find_code_by_rule` |
+| Resolve contained JavaScript or TypeScript module edges | `oxc_modules` |
+| Inspect one bounded TypeScript Compiler API project snapshot | `inspect_typescript_project` |
+| Parse, scan, fingerprint, or inspect PL/pgSQL | `postgres_parse` |
+| Apply the same PostgreSQL operations to contained files | `postgres_parse_files` |
+| Preview PostgreSQL deparse with round-trip proof | `postgres_deparse_preview` |
 | Run startup-retained project rules | `scan_project_rules` |
 | Run startup-retained rule tests | `test_project_rules` |
 | Inspect the effective server contract | `get_server_info` |
 
-Use `find_code` for a direct single-node pattern. Use `find_code_by_rule` when the query needs relational rules, composite logic, constraints, transformations, metadata, or a rule-level fix preview.
+Use `find_code` for a direct single-node pattern. Use `find_code_by_rule` when the query needs relational rules, composite logic, constraints, transformations, metadata, or a rule-level fix preview. TypeScript compiler and PostgreSQL parser questions belong to their dedicated tools rather than being approximated through unsupported ast-grep language patterns; interactive definitions, references, hover, and connected PostgreSQL semantics remain owned by `lsp-soleaux`.
 
 ## Rule document
 
@@ -235,7 +240,7 @@ pattern: function $NAME($$$PARAMS) { $$$BODY }
 
 When a rule does not match:
 
-1. Confirm the language and inspect the target with `dump_syntax_tree`.
+1. Confirm the language against `get_server_info.supported_language_ids` and inspect the target with `dump_syntax_tree` only if the search diagnostic is insufficient.
 2. Replace a complex pattern with its expected `kind`.
 3. Test the atomic target matcher by itself.
 4. Add relational constraints one at a time.
@@ -248,7 +253,7 @@ Do not infer correctness from a single positive match. A useful rule must also r
 
 ## Read-only previews
 
-`find_code` accepts an optional `rewrite`. `find_code_by_rule` preserves configured `fix`, transformation, rewriter, replacement, and replacement-offset data. An empty replacement previews deletion. Treat all such data as proposals: ProjectSAST never writes source files.
+`find_code` accepts an optional `rewrite`. `find_code_by_rule` preserves configured `fix`, transformation, rewriter, replacement, and replacement-offset data. An empty replacement previews deletion. Treat all such data as proposals: ast-soleaux structural-search tools never write source files.
 
 ## Configured rules and tests
 

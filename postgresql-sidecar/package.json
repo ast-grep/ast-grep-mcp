@@ -1,0 +1,25 @@
+{
+  "name": "ast-soleaux-postgresql-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "ast-soleaux-postgresql": "bin/ast-soleaux-postgresql.mjs"
+  },
+  "scripts": {
+    "test": "node --test --test-concurrency=1",
+    "format": "oxfmt --write bin test",
+    "format:check": "oxfmt --check bin test"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "@libpg-query/parser": "pg18",
+    "pgsql-deparser": "latest"
+  },
+  "devDependencies": {
+    "oxfmt": "0.65.0"
+  }
+}

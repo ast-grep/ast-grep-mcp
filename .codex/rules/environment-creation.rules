@@ -1,0 +1,37 @@
+prefix_rule(
+    pattern = ["uv", "venv"],
+    decision = "forbidden",
+    justification = "Use the repository-owned .venv synchronized with uv sync --locked --all-extras --dev --no-python-downloads.",
+    match = [
+        "uv venv",
+        "uv venv .venv-copy",
+    ],
+    not_match = [
+        "uv sync --locked --all-extras --dev --no-python-downloads",
+    ],
+)
+
+prefix_rule(
+    pattern = [["python", "python3"], "-m", "venv"],
+    decision = "forbidden",
+    justification = "Use the repository-owned .venv; do not create another Python environment.",
+    match = [
+        "python -m venv env",
+        "python3 -m venv /tmp/ast-env",
+    ],
+    not_match = [
+        "uv run --no-sync pytest tests/test_unit.py",
+    ],
+)
+
+prefix_rule(
+    pattern = ["virtualenv"],
+    decision = "forbidden",
+    justification = "Use the repository-owned .venv; do not create another Python environment.",
+    match = [
+        "virtualenv env",
+    ],
+    not_match = [
+        "uv sync --locked --all-extras --dev --no-python-downloads",
+    ],
+)

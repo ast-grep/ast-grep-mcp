@@ -4,16 +4,17 @@ import hashlib
 import os
 import shutil
 import stat
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import cast
 
 import pytest
 import yaml
 
-import config_snapshot as snapshot_module
-from config_snapshot import create_config_snapshot, load_strict_yaml_documents
-from main import validate_rule_yaml
+import ast_soleaux.config_snapshot as snapshot_module
+from ast_soleaux.config_snapshot import create_config_snapshot, load_strict_yaml_documents
+from ast_soleaux.server import validate_rule_yaml
 
 
 def write_project_config(root: Path, config: str) -> Path:
@@ -22,13 +23,12 @@ def write_project_config(root: Path, config: str) -> Path:
     return path
 
 
-def create_snapshot(root: Path, config: str = "ruleDirs: []\n", **kwargs: Any) -> snapshot_module.ConfigSnapshot:
+def create_snapshot(root: Path, config: str = "ruleDirs: []\n") -> snapshot_module.ConfigSnapshot:
     write_project_config(root, config)
     return create_config_snapshot(
         config_path="sgconfig.yml",
         working_directory=root,
         allowed_roots=(root.resolve(),),
-        **kwargs,
     )
 
 
@@ -105,9 +105,10 @@ def test_snapshot_freezes_separate_least_privilege_configs_and_cleans_up(tmp_pat
         "configured_tests": True,
         "custom_languages": False,
     }
-    assert snapshot.provenance["source_sha256"] == hashlib.sha256(config_path.read_bytes()).hexdigest()
-    assert snapshot.provenance["resource_files"] == 5
-    assert snapshot.provenance["resource_bytes"] > 0
+    assert snapshot.provenance.get("source_sha256") == hashlib.sha256(config_path.read_bytes()).hexdigest()
+    assert snapshot.provenance.get("resource_files") == 5
+    resource_bytes = snapshot.provenance.get("resource_bytes")
+    assert isinstance(resource_bytes, int) and resource_bytes > 0
     assert len(snapshot.digest) == 64
     if os.name == "posix":
         assert stat.S_IMODE(bundle.stat().st_mode) == 0o500
@@ -254,7 +255,7 @@ def test_snapshot_fallback_copy_rejects_links_and_retains_regular_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(snapshot_module.os, "supports_dir_fd", set())
+    monkeypatch.setattr(snapshot_module.os, "supports_dir_fd", set[object]())
     rules = tmp_path / "rules"
     rules.mkdir()
     rule = rules / "rule.yml"
@@ -447,7 +448,10 @@ def test_snapshot_selects_the_gnu_library_on_a_glibc_host(tmp_path: Path, monkey
         snapshot.close()
 
 
-@pytest.mark.parametrize("libc", [("musl", "1"), ("libc", "6")])
+@pytest.mark.parametrize(
+    "libc",
+    [pytest.param(("musl", "1"), id="musl"), pytest.param(("libc", "6"), id="generic-libc")],
+)
 def test_snapshot_does_not_treat_a_named_libc_as_glibc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, libc: tuple[str, str]) -> None:
     """A non-empty libc name is not evidence of glibc; Alpine reports ("musl", "1")."""
     monkeypatch.setattr(snapshot_module.platform, "system", lambda: "Linux")
@@ -489,7 +493,7 @@ def test_read_file_rejects_a_link_when_the_platform_cannot_refuse_to_follow_it(t
     resource = tmp_path / "resource.yml"
     resource.symlink_to(outside)
 
-    monkeypatch.setattr(snapshot_module.os, "supports_dir_fd", frozenset())
+    monkeypatch.setattr(snapshot_module.os, "supports_dir_fd", frozenset[object]())
     monkeypatch.delattr(snapshot_module.os, "O_NOFOLLOW", raising=False)
 
     with pytest.raises(ValueError, match="replaced with a link"):
@@ -654,7 +658,7 @@ def test_snapshot_fallback_rejects_a_directory_swapped_after_validation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(snapshot_module.os, "supports_dir_fd", set())
+    monkeypatch.setattr(snapshot_module.os, "supports_dir_fd", set[object]())
     rules = tmp_path / "rules"
     nested = rules / "nested"
     outside = tmp_path / "outside"
@@ -666,9 +670,9 @@ def test_snapshot_fallback_rejects_a_directory_swapped_after_validation(
     real_scandir = snapshot_module.os.scandir
     swapped = False
 
-    def swap_on_reopen(target: Any) -> Any:
+    def swap_on_reopen(target: str | os.PathLike[str]) -> Iterator[os.DirEntry[str]]:
         nonlocal swapped
-        if not swapped and isinstance(target, (str, Path)) and os.path.basename(str(target)) == nested.name:
+        if not swapped and os.path.basename(os.fspath(target)) == nested.name:
             swapped = True
             shutil.rmtree(nested)
             nested.symlink_to(outside, target_is_directory=True)

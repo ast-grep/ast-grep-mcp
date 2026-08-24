@@ -1,5 +1,9 @@
 {
-  "include": ["main.py", "config_snapshot.py", "scripts"],
+  "include": [
+    "ast_soleaux",
+    "execution-sidecar",
+    "scripts"
+  ],
   "typeCheckingMode": "strict",
   "reportUnusedFunction": "none",
   "pythonVersion": "3.14",

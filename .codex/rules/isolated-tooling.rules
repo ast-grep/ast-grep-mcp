@@ -1,0 +1,74 @@
+prefix_rule(
+    pattern = ["uvx"],
+    decision = "forbidden",
+    justification = "Run repository tools through uv run --no-sync in the locked repository environment.",
+    match = [
+        "uvx ruff check .",
+    ],
+    not_match = [
+        "uv run --no-sync ruff check .",
+    ],
+)
+
+prefix_rule(
+    pattern = ["uv", "tool"],
+    decision = "forbidden",
+    justification = "Run repository tools through uv run --no-sync; do not use a separately managed uv tool environment.",
+    match = [
+        "uv tool run ruff check .",
+        "uv tool install ruff",
+    ],
+    not_match = [
+        "uv run --no-sync ruff check .",
+    ],
+)
+
+prefix_rule(
+    pattern = ["uv", "python", "install"],
+    decision = "forbidden",
+    justification = "Use the interpreter pinned by the repository; do not install another interpreter for repository work.",
+    match = [
+        "uv python install 3.14",
+    ],
+    not_match = [
+        "uv python find",
+    ],
+)
+
+prefix_rule(
+    pattern = ["uv", "run", ["--isolated", "--with", "--active"]],
+    decision = "forbidden",
+    justification = "Use uv run --no-sync so commands reuse the synchronized repository environment.",
+    match = [
+        "uv run --isolated pytest",
+        "uv run --with pytest pytest",
+        "uv run --active pytest",
+    ],
+    not_match = [
+        "uv run --no-sync pytest",
+    ],
+)
+
+prefix_rule(
+    pattern = ["uv", "--active"],
+    decision = "forbidden",
+    justification = "Use the repository-owned .venv without selecting an externally active environment.",
+    match = [
+        "uv --active run pytest",
+    ],
+    not_match = [
+        "uv run --no-sync pytest",
+    ],
+)
+
+prefix_rule(
+    pattern = ["uv", "sync", "--no-build-isolation"],
+    decision = "forbidden",
+    justification = "Keep build isolation enabled so build-system.requires is provisioned correctly.",
+    match = [
+        "uv sync --no-build-isolation",
+    ],
+    not_match = [
+        "uv sync --locked --all-extras --dev --no-python-downloads",
+    ],
+)

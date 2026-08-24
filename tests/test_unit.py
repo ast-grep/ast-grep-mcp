@@ -11,13 +11,15 @@ import time
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, cast
 
 import pytest
 import yaml
+from mcp.types import TextContent
+from pytest_mock import MockerFixture
 
-from config_snapshot import ConfigSnapshot
-from main import (
+from ast_soleaux.config_snapshot import ConfigSnapshot
+from ast_soleaux.server import (
+    JSON_OBJECT_ADAPTER,
     MAX_NATIVE_LIBRARY_BYTES,
     MAX_NDJSON_RECORD_BYTES,
     MAX_OUTLINE_PATHS,
@@ -28,22 +30,32 @@ from main import (
     MAX_TEST_REPORT_BYTES,
     POSIX_ARG_HEADROOM_BYTES,
     PROCESS_TERMINATION_GRACE_SECONDS,
+    SERVER_INSTRUCTIONS,
     SUPPORTED_AST_GREP_VERSION,
+    SUPPORTED_OXC_HELPER_VERSION,
+    SUPPORTED_OXC_PARSER_VERSION,
+    SUPPORTED_OXC_RESOLVER_VERSION,
     WINDOWS_CREATE_PROCESS_LIMIT,
     AstGrepService,
+    JsonObject,
+    JsonValue,
     OutlineResults,
+    OxcVersions,
     ResolvedExecutable,
-    ServerRuntime,
+    ResultCursorStore,
+    RuntimeServices,
     _parse_match_record,
     _requires_node,
     build_argument_parser,
     build_runtime,
+    create_mcp,
     format_matches_as_text,
     format_outline_results,
     format_search_results,
     outline_tool_result,
     parse_stream_matches,
     resolve_ast_grep_executable,
+    resolve_oxc_helper_executable,
     run_mcp_server,
     run_ndjson_process,
     run_outline_process,
@@ -55,25 +67,60 @@ from main import (
 )
 
 
+def invoke_boundary(target: object, **kwargs: object) -> object:
+    assert callable(target)
+    return target(**kwargs)
+
+
+def test_server_instructions_describe_the_capability_gated_effects() -> None:
+    assert "Read-only structural code inspection" not in SERVER_INSTRUCTIONS
+    assert "TypeScript compiler" in SERVER_INSTRUCTIONS
+    assert "PostgreSQL parser" in SERVER_INSTRUCTIONS
+    assert "file mutation and execution tools are separate" in SERVER_INSTRUCTIONS
+
+
+def json_object(value: object) -> JsonObject:
+    return JSON_OBJECT_ADAPTER.validate_python(value, strict=True)
+
+
+def json_list(value: object) -> list[JsonValue]:
+    assert isinstance(value, list)
+    return value
+
+
+def json_object_member(parent: JsonObject, key: str) -> JsonObject:
+    value = parent[key]
+    assert isinstance(value, dict)
+    return value
+
+
+def first_json_object(value: object) -> JsonObject:
+    items = json_list(value)
+    assert items
+    item = items[0]
+    assert isinstance(item, dict)
+    return item
+
+
 class RecordingRunner:
     def __init__(self, *, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
         self.stdout = stdout
         self.stderr = stderr
         self.returncode = returncode
-        self.calls: list[tuple[list[str], dict[str, Any]]] = []
+        self.calls: list[tuple[list[str], dict[str, object]]] = []
 
-    def __call__(self, arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def __call__(self, arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         self.calls.append((arguments, kwargs))
         return subprocess.CompletedProcess(arguments, self.returncode, self.stdout, self.stderr)
 
 
 class RecordingOutlineRunner:
-    def __init__(self, documents: list[dict[str, Any]], *, observed_extra: bool = False) -> None:
-        self.documents = documents
+    def __init__(self, documents: Sequence[object], *, observed_extra: bool = False) -> None:
+        self.documents = [json_object(document) for document in documents]
         self.observed_extra = observed_extra
-        self.calls: list[tuple[list[str], dict[str, Any]]] = []
+        self.calls: list[tuple[list[str], dict[str, object]]] = []
 
-    def __call__(self, command: Sequence[str], **kwargs: Any) -> tuple[list[dict[str, Any]], bool]:
+    def __call__(self, command: Sequence[str], **kwargs: object) -> tuple[list[JsonObject], bool]:
         self.calls.append((list(command), kwargs))
         return self.documents, self.observed_extra
 
@@ -87,47 +134,53 @@ def file_stdout_command(payload_path: Path) -> list[str]:
     ]
 
 
-def canonical_outline_item(name: str) -> dict[str, Any]:
-    return {
-        "role": "item",
-        "symbolType": "function",
-        "name": name,
-        "signature": f"def {name}():",
-        "range": {
-            "byteOffset": {"start": 0, "end": len(name.encode("utf-8"))},
-            "start": {"line": 0, "column": 0},
-            "end": {"line": 0, "column": len(name)},
-        },
-        "astKind": "function_definition",
-        "isImport": False,
-        "isExported": False,
-    }
+def canonical_outline_item(name: str) -> JsonObject:
+    return json_object(
+        {
+            "role": "item",
+            "symbolType": "function",
+            "name": name,
+            "signature": f"def {name}():",
+            "range": {
+                "byteOffset": {"start": 0, "end": len(name.encode("utf-8"))},
+                "start": {"line": 0, "column": 0},
+                "end": {"line": 0, "column": len(name)},
+            },
+            "astKind": "function_definition",
+            "isImport": False,
+            "isExported": False,
+        }
+    )
 
 
-def source_range(text: str, *, start_offset: int = 0, start_column: int = 0) -> dict[str, Any]:
+def source_range(text: str, *, start_offset: int = 0, start_column: int = 0) -> JsonObject:
     byte_length = len(text.encode("utf-8"))
-    return {
-        "byteOffset": {"start": start_offset, "end": start_offset + byte_length},
-        "start": {"line": 0, "column": start_column},
-        "end": {"line": 0, "column": start_column + len(text)},
-    }
+    return json_object(
+        {
+            "byteOffset": {"start": start_offset, "end": start_offset + byte_length},
+            "start": {"line": 0, "column": start_column},
+            "end": {"line": 0, "column": start_column + len(text)},
+        }
+    )
 
 
-def canonical_match(*, file: str = "a.py", text: str = "print(1)") -> dict[str, Any]:
-    return {
-        "text": text,
-        "range": source_range(text),
-        "file": file,
-        "lines": text,
-        "charCount": {"leading": 0, "trailing": 0},
-        "language": "Python",
-        "metaVariables": {"single": {}, "multi": {}, "transformed": {}},
-        "ruleId": "test-rule",
-        "severity": "warning",
-        "note": None,
-        "message": "test message",
-        "labels": [{"text": text, "range": source_range(text), "style": "primary"}],
-    }
+def canonical_match(*, file: str = "a.py", text: str = "print(1)") -> JsonObject:
+    return json_object(
+        {
+            "text": text,
+            "range": source_range(text),
+            "file": file,
+            "lines": text,
+            "charCount": {"leading": 0, "trailing": 0},
+            "language": "Python",
+            "metaVariables": {"single": {}, "multi": {}, "transformed": {}},
+            "ruleId": "test-rule",
+            "severity": "warning",
+            "note": None,
+            "message": "test message",
+            "labels": [{"text": text, "range": source_range(text), "style": "primary"}],
+        }
+    )
 
 
 def fake_config_snapshot(root: Path) -> ConfigSnapshot:
@@ -193,11 +246,23 @@ def make_runtime(
     default_max_results: int = 50,
     max_results_cap: int = 500,
     forbid_regex_rules: bool = False,
-) -> ServerRuntime:
+    with_oxc: bool = False,
+) -> RuntimeServices:
     executable = root / "ast-grep-test-executable"
     executable.write_text("test executable", encoding="utf-8")
     executable.chmod(0o755)
-    return ServerRuntime(
+    oxc_helper: ResolvedExecutable | None = None
+    oxc_versions: OxcVersions | None = None
+    if with_oxc:
+        helper = root / "ast-soleaux-oxc.mjs"
+        helper.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+        oxc_helper = ResolvedExecutable(path=helper, command_prefix=("node", str(helper)))
+        oxc_versions = {
+            "helper": SUPPORTED_OXC_HELPER_VERSION,
+            "parser": SUPPORTED_OXC_PARSER_VERSION,
+            "resolver": SUPPORTED_OXC_RESOLVER_VERSION,
+        }
+    return RuntimeServices(
         working_directory=root,
         executable=ResolvedExecutable(path=executable, command_prefix=(str(executable),)),
         ast_grep_version=SUPPORTED_AST_GREP_VERSION,
@@ -207,10 +272,12 @@ def make_runtime(
         default_max_results=default_max_results,
         max_results_cap=max_results_cap,
         forbid_regex_rules=forbid_regex_rules,
+        oxc_helper=oxc_helper,
+        oxc_versions=oxc_versions,
     )
 
 
-def version_runner(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+def version_runner(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(arguments, 0, f"ast-grep {SUPPORTED_AST_GREP_VERSION}\n", "")
 
 
@@ -241,6 +308,78 @@ def test_build_runtime_resolves_config_roots_and_version(tmp_path: Path) -> None
     assert runtime.forbid_regex_rules is True
 
 
+def test_build_runtime_resolves_and_versions_optional_oxc_helper(tmp_path: Path) -> None:
+    executable = tmp_path / "ast-grep"
+    executable.write_text("test executable", encoding="utf-8")
+    executable.chmod(0o755)
+    helper = tmp_path / "ast-soleaux-oxc.mjs"
+    helper.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+
+    def runtime_version_runner(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if arguments[-1] == "--version-json":
+            return subprocess.CompletedProcess(
+                arguments,
+                0,
+                json.dumps(
+                    {
+                        "helper": SUPPORTED_OXC_HELPER_VERSION,
+                        "parser": SUPPORTED_OXC_PARSER_VERSION,
+                        "resolver": SUPPORTED_OXC_RESOLVER_VERSION,
+                    }
+                ),
+                "",
+            )
+        return version_runner(arguments, **kwargs)
+
+    runtime = build_runtime(
+        working_directory=tmp_path,
+        ast_grep_executable=str(executable),
+        oxc_helper_executable=str(helper),
+        runner=runtime_version_runner,
+    )
+    try:
+        assert runtime.oxc_helper is not None
+        assert runtime.oxc_helper.path == helper
+        assert runtime.oxc_versions == {
+            "helper": SUPPORTED_OXC_HELPER_VERSION,
+            "parser": SUPPORTED_OXC_PARSER_VERSION,
+            "resolver": SUPPORTED_OXC_RESOLVER_VERSION,
+        }
+    finally:
+        runtime.close()
+
+
+def test_build_runtime_rejects_oxc_helper_version_drift(tmp_path: Path) -> None:
+    executable = tmp_path / "ast-grep"
+    executable.write_text("test executable", encoding="utf-8")
+    executable.chmod(0o755)
+    helper = tmp_path / "ast-soleaux-oxc.mjs"
+    helper.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+
+    def drifted_runner(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if arguments[-1] == "--version-json":
+            return subprocess.CompletedProcess(
+                arguments,
+                0,
+                json.dumps({"helper": "0.0.0", "parser": "0.0.0", "resolver": "0.0.0"}),
+                "",
+            )
+        return version_runner(arguments, **kwargs)
+
+    with pytest.raises(ValueError, match="must report exactly"):
+        build_runtime(
+            working_directory=tmp_path,
+            ast_grep_executable=str(executable),
+            oxc_helper_executable=str(helper),
+            runner=drifted_runner,
+        )
+
+
+def test_resolve_oxc_helper_requires_a_real_file(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="does not exist"):
+        resolve_oxc_helper_executable(str(tmp_path / "missing.mjs"), working_directory=tmp_path)
+
+
 def test_build_runtime_validates_configured_tests_before_returning(tmp_path: Path) -> None:
     executable = tmp_path / "ast-grep"
     executable.write_text("test executable", encoding="utf-8")
@@ -251,7 +390,7 @@ def test_build_runtime_validates_configured_tests_before_returning(tmp_path: Pat
     config.write_text("testConfigs:\n  - testDir: rule-tests\n", encoding="utf-8")
     calls: list[list[str]] = []
 
-    def successful_runner(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def successful_runner(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(arguments)
         stdout = f"ast-grep {SUPPORTED_AST_GREP_VERSION}\n" if arguments[-1] == "--version" else ""
         return subprocess.CompletedProcess(arguments, 0, stdout, "")
@@ -265,7 +404,7 @@ def test_build_runtime_validates_configured_tests_before_returning(tmp_path: Pat
 
     assert [command[1] for command in calls[1:]] == ["scan", "test"]
     runtime.close()
-    assert not (tmp_path / ".project-sast-runtime").exists()
+    assert not (tmp_path / ".ast-soleaux-runtime").exists()
 
 
 def test_build_runtime_removes_snapshot_when_startup_validation_fails(tmp_path: Path) -> None:
@@ -276,7 +415,7 @@ def test_build_runtime_removes_snapshot_when_startup_validation_fails(tmp_path: 
     config.write_text("ruleDirs: []\n", encoding="utf-8")
     calls = 0
 
-    def failing_runner(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def failing_runner(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -290,7 +429,7 @@ def test_build_runtime_removes_snapshot_when_startup_validation_fails(tmp_path: 
             config_path="sgconfig.yml",
             runner=failing_runner,
         )
-    assert not (tmp_path / ".project-sast-runtime").exists()
+    assert not (tmp_path / ".ast-soleaux-runtime").exists()
 
 
 def test_build_runtime_rejects_missing_executable(tmp_path: Path) -> None:
@@ -315,7 +454,7 @@ def test_build_runtime_rejects_ast_grep_version_drift(tmp_path: Path) -> None:
     executable.write_text("test executable", encoding="utf-8")
     executable.chmod(0o755)
 
-    def drifted_version_runner(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def drifted_version_runner(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(arguments, 0, "ast-grep 0.0.0\n", "")
 
     with pytest.raises(ValueError) as error:
@@ -456,7 +595,7 @@ def test_argument_parser_rejects_removed_transport_surface(
     assert "unrecognized arguments" in stderr
 
 
-def test_requires_node_closes_executable(mocker: Any) -> None:
+def test_requires_node_closes_executable(mocker: MockerFixture) -> None:
     handle = mocker.MagicMock()
     handle.__enter__.return_value = handle
     handle.readline.return_value = b"#!/usr/bin/env node\n"
@@ -568,7 +707,7 @@ def test_resolve_ast_grep_executable_uses_matching_optional_native_package(
     shim = tmp_path / "node_modules" / ".bin" / "ast-grep"
     shim.parent.mkdir(parents=True)
     shim.write_text("shim", encoding="utf-8")
-    monkeypatch.setattr("main._native_ast_grep_package_name", lambda: package_name)
+    monkeypatch.setattr("ast_soleaux.server._native_ast_grep_package_name", lambda: package_name)
 
     resolved = resolve_ast_grep_executable(str(shim), working_directory=tmp_path)
 
@@ -637,10 +776,19 @@ def test_posix_complete_process_budget_accepts_boundary_and_rejects_one_less_byt
         )
 
 
-@pytest.mark.parametrize("command", [["tool.cmd"], ["tool.bat"]])
+@pytest.mark.parametrize(
+    "command",
+    [pytest.param(["tool.cmd"], id="cmd"), pytest.param(["tool.bat"], id="bat")],
+)
 def test_process_budget_rejects_batch_commands_on_every_platform(command: list[str]) -> None:
     with pytest.raises(ValueError, match="Batch-file commands"):
         validate_process_budget(command, environment={}, platform_name="nt")
+
+
+def invoke_process_budget_boundary(command: object, environment: object) -> None:
+    boundary: object = validate_process_budget
+    assert callable(boundary)
+    boundary(command, environment=environment, platform_name="nt")
 
 
 @pytest.mark.parametrize(
@@ -650,9 +798,9 @@ def test_process_budget_rejects_batch_commands_on_every_platform(command: list[s
         pytest.param(["tool\0"], id="nul"),
     ],
 )
-def test_process_budget_rejects_invalid_runtime_command_values(command: list[Any]) -> None:
+def test_process_budget_rejects_invalid_runtime_command_values(command: list[object]) -> None:
     with pytest.raises(ValueError, match="Command arguments must be strings without NUL characters"):
-        validate_process_budget(command, environment={}, platform_name="nt")
+        invoke_process_budget_boundary(command, {})
 
 
 @pytest.mark.parametrize(
@@ -665,13 +813,13 @@ def test_process_budget_rejects_invalid_runtime_command_values(command: list[Any
         pytest.param({"BAD=KEY": "value"}, id="equals-in-name"),
     ],
 )
-def test_process_budget_rejects_invalid_runtime_environment_values(environment: dict[Any, Any]) -> None:
+def test_process_budget_rejects_invalid_runtime_environment_values(environment: dict[object, object]) -> None:
     with pytest.raises(ValueError, match="Subprocess environment names and values must be valid NUL-free strings"):
-        validate_process_budget(["tool"], environment=environment, platform_name="nt")
+        invoke_process_budget_boundary(["tool"], environment)
 
 
 def test_run_process_reports_timeout() -> None:
-    def timeout_runner(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def timeout_runner(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         raise subprocess.TimeoutExpired(arguments, timeout=1)
 
     with pytest.raises(RuntimeError, match="timed out after 1 seconds"):
@@ -719,7 +867,7 @@ time.sleep(30)
 
 
 def test_run_process_reports_os_error() -> None:
-    def os_error_runner(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def os_error_runner(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         raise OSError(7, "Argument list too long")
 
     with pytest.raises(RuntimeError, match="could not be executed"):
@@ -731,7 +879,7 @@ def test_run_mcp_server_rejects_malformed_boolean_environment(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("AST_GREP_FORBID_REGEX_RULES", "maybe")
-    monkeypatch.setattr(sys, "argv", ["ast-grep-server"])
+    monkeypatch.setattr(sys, "argv", ["ast-soleaux"])
 
     with pytest.raises(SystemExit) as error:
         run_mcp_server()
@@ -1039,8 +1187,10 @@ def test_dump_syntax_tree_preserves_debug_output_when_pattern_has_no_match(tmp_p
 def test_dump_syntax_tree_runs_inside_empty_sandbox(tmp_path: Path) -> None:
     observed: list[Path] = []
 
-    def sandbox_runner(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        cwd = Path(kwargs["cwd"])
+    def sandbox_runner(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        cwd_value = kwargs.get("cwd")
+        assert isinstance(cwd_value, (str, Path))
+        cwd = Path(cwd_value)
         observed.append(cwd)
         assert cwd != tmp_path
         assert list(cwd.iterdir()) == []
@@ -1057,9 +1207,11 @@ def test_dump_syntax_tree_removes_sandbox_and_generated_config_after_timeout(tmp
     observed_sandbox: Path | None = None
     observed_config: Path | None = None
 
-    def timeout_runner(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def timeout_runner(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         nonlocal observed_config, observed_sandbox
-        observed_sandbox = Path(kwargs["cwd"])
+        cwd_value = kwargs.get("cwd")
+        assert isinstance(cwd_value, (str, Path))
+        observed_sandbox = Path(cwd_value)
         observed_config = Path(arguments[arguments.index("--config") + 1])
         raise subprocess.TimeoutExpired(arguments, timeout=2)
 
@@ -1183,14 +1335,14 @@ def test_outline_requires_one_to_sixty_four_files(tmp_path: Path) -> None:
     outline_runner = RecordingOutlineRunner([])
     service = AstGrepService(make_runtime(tmp_path), outline_runner=outline_runner)
 
-    with pytest.raises(ValueError, match="between 1 and 64"):
+    with pytest.raises(ValueError, match="requires paths or include_globs"):
         service.outline_code(
             project_folder="project",
             paths=[],
             language=None,
             max_results=1,
         )
-    with pytest.raises(ValueError, match="between 1 and 64"):
+    with pytest.raises(ValueError, match="more than 64"):
         service.outline_code(
             project_folder="project",
             paths=[f"file-{index}.py" for index in range(MAX_OUTLINE_PATHS + 1)],
@@ -1225,6 +1377,54 @@ def test_outline_rejects_directory_path(tmp_path: Path) -> None:
         )
 
     assert outline_runner.calls == []
+
+
+def test_outline_returns_valid_files_with_structured_missing_path_errors(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "valid.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    outline_runner = RecordingOutlineRunner([{"path": str(source), "language": "Python", "items": []}])
+    service = AstGrepService(make_runtime(tmp_path), outline_runner=outline_runner)
+
+    result = service.outline_code(
+        project_folder="project",
+        paths=["valid.py", "missing.py"],
+        strict_paths=False,
+        max_results=5,
+    )
+
+    assert result["resolved_paths"] == ["valid.py"]
+    assert result["path_errors"][0]["path"] == "missing.py"
+    assert "effective path" in result["path_errors"][0]["error"]
+    assert [file["file"] for file in result["files"]] == ["valid.py"]
+
+
+def test_outline_resolves_bounded_globs_without_guessed_file_names(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    source = project / "src" / "a.py"
+    nested = project / "src" / "nested" / "b.py"
+    excluded = project / "src" / "nested" / "b.test.py"
+    for file in (source, nested, excluded):
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text("value = 1\n", encoding="utf-8")
+    documents = [
+        {"path": str(source), "language": "Python", "items": []},
+        {"path": str(nested), "language": "Python", "items": []},
+    ]
+    outline_runner = RecordingOutlineRunner(documents)
+    service = AstGrepService(make_runtime(tmp_path), outline_runner=outline_runner)
+
+    result = service.outline_code(
+        project_folder="project",
+        include_globs=["src/**/*.py"],
+        exclude_globs=["**/*.test.py"],
+        max_results=5,
+    )
+
+    assert result["resolved_paths"] == ["src/a.py", "src/nested/b.py"]
+    command = outline_runner.calls[0][0]
+    assert command[-3:] == ["--", str(source), str(nested)]
 
 
 def test_outline_rejects_absolute_and_parent_escape_paths(tmp_path: Path) -> None:
@@ -1343,6 +1543,8 @@ def test_outline_counts_and_trims_nodes_recursively_in_preorder(tmp_path: Path) 
         "returned": 3,
         "truncated": True,
         "limit": 3,
+        "resolved_paths": ["example.py"],
+        "path_errors": [],
     }
     command, kwargs = outline_runner.calls[0]
     assert command[1] == "outline"
@@ -1354,23 +1556,23 @@ def test_outline_counts_and_trims_nodes_recursively_in_preorder(tmp_path: Path) 
 def test_outline_forwards_optional_language_and_removes_temporary_config(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
-    source = project / "example.custom"
-    source.write_text("value\n", encoding="utf-8")
+    source = project / "example.py"
+    source.write_text("value = 1\n", encoding="utf-8")
     observed_config: Path | None = None
 
-    def outline_runner(command: Sequence[str], **kwargs: Any) -> tuple[list[dict[str, Any]], bool]:
+    def outline_runner(command: Sequence[str], **kwargs: object) -> tuple[list[JsonObject], bool]:
         nonlocal observed_config
         observed_config = Path(command[command.index("--config") + 1])
         assert observed_config.exists()
-        assert command[command.index("--lang") + 1] == "custom"
-        return ([{"path": str(source), "language": "Custom", "items": []}], False)
+        assert command[command.index("--lang") + 1] == "python"
+        return ([{"path": str(source), "language": "Python", "items": []}], False)
 
     service = AstGrepService(make_runtime(tmp_path), outline_runner=outline_runner)
 
     result = service.outline_code(
         project_folder="project",
-        paths=["example.custom"],
-        language="custom",
+        paths=["example.py"],
+        language="python",
         max_results=None,
     )
 
@@ -1386,7 +1588,7 @@ def test_outline_removes_temporary_config_when_streaming_fails(tmp_path: Path) -
     source.write_text("pass\n", encoding="utf-8")
     observed_config: Path | None = None
 
-    def outline_runner(command: Sequence[str], **kwargs: Any) -> tuple[list[dict[str, Any]], bool]:
+    def outline_runner(command: Sequence[str], **kwargs: object) -> tuple[list[JsonObject], bool]:
         nonlocal observed_config
         observed_config = Path(command[command.index("--config") + 1])
         assert observed_config.exists()
@@ -1459,6 +1661,7 @@ def test_search_uses_limit_plus_one_globs_and_relative_results(tmp_path: Path) -
             {
                 "file": "src/example.py",
                 "text": "print('one')",
+                "evidence_kind": "syntax",
                 "range": {"start": {"line": 0}, "end": {"line": 0}},
             }
         ],
@@ -1627,9 +1830,9 @@ def test_search_rejects_partial_results_when_a_path_failed(tmp_path: Path) -> No
         )
 
 
-def _outline_document(path: str, count: int) -> dict[str, Any]:
+def _outline_document(path: str, count: int) -> JsonObject:
     items = [{"name": f"symbol{index}", "symbolType": "function"} for index in range(count)]
-    return {"path": path, "language": "Python", "items": items}
+    return json_object({"path": path, "language": "Python", "items": items})
 
 
 def test_outline_does_not_report_truncation_when_the_limit_is_met_exactly(tmp_path: Path) -> None:
@@ -1723,7 +1926,7 @@ def test_outline_preserves_unknown_document_fields(tmp_path: Path) -> None:
 
     result = service.outline_code(project_folder="project", language=None, paths=["a.py"], max_results=5)
 
-    file_document = cast(dict[str, Any], result["files"][0])
+    file_document = JSON_OBJECT_ADAPTER.validate_python(result["files"][0], strict=True)
     assert file_document["futureField"] == {"preserved": True}
     assert "path" not in file_document
 
@@ -1749,13 +1952,23 @@ def test_outline_rejects_an_empty_optional_language(tmp_path: Path) -> None:
     source.write_text("def a(): pass\n", encoding="utf-8")
     service = AstGrepService(make_runtime(tmp_path), outline_runner=RecordingOutlineRunner([]))
 
-    with pytest.raises(ValueError, match="cannot be empty"):
+    with pytest.raises(ValueError, match="language is required"):
         service.outline_code(
             project_folder=str(tmp_path),
             language="",
             paths=["a.py"],
             max_results=5,
         )
+
+
+def test_unsupported_language_fails_before_process_launch(tmp_path: Path) -> None:
+    runner = RecordingRunner()
+    service = AstGrepService(make_runtime(tmp_path), runner=runner)
+
+    with pytest.raises(ValueError, match=r"Unsupported language 'sql'.*python"):
+        service.dump_syntax_tree(code="select 1", language="sql", format="cst")
+
+    assert runner.calls == []
 
 
 def test_search_rejects_match_that_vanished_before_normalization(tmp_path: Path) -> None:
@@ -1780,11 +1993,13 @@ def test_search_rejects_match_that_vanished_before_normalization(tmp_path: Path)
 
 def test_format_matches_and_truncation_header() -> None:
     matches = [
-        {
-            "file": "src/example.py",
-            "text": "print('one')",
-            "range": {"start": {"line": 4}, "end": {"line": 4}},
-        }
+        json_object(
+            {
+                "file": "src/example.py",
+                "text": "print('one')",
+                "range": {"start": {"line": 4}, "end": {"line": 4}},
+            }
+        )
     ]
 
     assert format_matches_as_text(matches) == "src/example.py:5\nprint('one')"
@@ -1819,11 +2034,13 @@ def test_format_outline_results_preserves_hierarchy_and_truncation() -> None:
     )
     text_result = outline_tool_result(results, "text")
     assert text_result.structured_content == results
-    text_block = cast(Any, text_result.content[0])
+    text_block = text_result.content[0]
+    assert isinstance(text_block, TextContent)
     assert text_block.text.startswith("Found 2 outline nodes")
     json_result = outline_tool_result(results, "json")
     assert json_result.structured_content == results
-    json_block = cast(Any, json_result.content[0])
+    json_block = json_result.content[0]
+    assert isinstance(json_block, TextContent)
     assert json.loads(json_block.text) == results
 
 
@@ -1832,13 +2049,18 @@ def test_server_info_exposes_effective_contract(tmp_path: Path) -> None:
 
     info = AstGrepService(runtime).get_server_info()
 
-    assert info["fork_version"] == "0.4.0"
+    assert info["fork_version"] == "0.5.0"
     assert info["ast_grep_version"] == SUPPORTED_AST_GREP_VERSION
+    assert info["oxc_helper_executable"] is None
+    assert info["oxc_versions"] is None
+    assert info["capabilities"]["javascript_module_inspection"] is False
     assert info["allowed_roots"] == [str(tmp_path)]
     assert info["default_max_results"] == 25
     assert info["max_results_cap"] == 100
     assert info["forbid_regex_rules"] is True
     assert os.path.isabs(info["ast_grep_executable"])
+    assert "python" in info["supported_language_ids"]
+    assert "sql" not in info["supported_language_ids"]
 
 
 def test_text_runner_streams_bounded_stdin_and_utf8_output(tmp_path: Path) -> None:
@@ -2081,7 +2303,7 @@ def test_match_validator_accepts_transforms_replacement_and_multiple_metavariabl
     match["replacement"] = "logger.info(1)"
     match["replacementOffsets"] = {"start": 10, "end": 18}
     match["metadata"] = {"category": "test"}
-    match["labels"][0]["message"] = "primary"
+    first_json_object(match["labels"])["message"] = "primary"
 
     validate_match_document(match, record_number=1)
 
@@ -2096,8 +2318,9 @@ def test_match_validator_accepts_multiline_position_geometry() -> None:
     text = "one\nβ"
     match = canonical_match(text=text)
     match["lines"] = text
-    match["range"]["end"] = {"line": 1, "column": 1}
-    match["labels"][0]["range"]["end"] = {"line": 1, "column": 1}
+    json_object_member(match, "range")["end"] = {"line": 1, "column": 1}
+    label = first_json_object(match["labels"])
+    json_object_member(label, "range")["end"] = {"line": 1, "column": 1}
     validate_match_document(match, record_number=1)
 
 
@@ -2113,7 +2336,7 @@ def test_match_validator_rejects_impossible_position_geometry(end: dict[str, int
     text = "one\nβ" if end["line"] else "print(1)"
     match = canonical_match(text=text)
     match["lines"] = text
-    match["range"]["end"] = end
+    json_object_member(match, "range")["end"] = json_object(end)
     with pytest.raises(RuntimeError, match="line and column geometry"):
         validate_match_document(match, record_number=1)
 
@@ -2128,7 +2351,7 @@ def test_match_validator_rejects_impossible_position_geometry(end: dict[str, int
         pytest.param(("metadata", []), "invalid metadata", id="metadata"),
     ],
 )
-def test_match_validator_rejects_invalid_typed_fields(mutation: tuple[str, Any], message: str) -> None:
+def test_match_validator_rejects_invalid_typed_fields(mutation: tuple[str, JsonValue], message: str) -> None:
     match = canonical_match()
     field, value = mutation
     match[field] = value
@@ -2148,7 +2371,7 @@ def test_match_validator_rejects_invalid_typed_fields(mutation: tuple[str, Any],
         pytest.param("note", 1, "invalid note", id="note"),
     ],
 )
-def test_match_validator_rejects_missing_canonical_fields(field: str, value: Any, message: str) -> None:
+def test_match_validator_rejects_missing_canonical_fields(field: str, value: JsonValue, message: str) -> None:
     match = canonical_match()
     match[field] = value
     with pytest.raises(RuntimeError, match=message):
@@ -2167,36 +2390,38 @@ def test_match_validator_rejects_invalid_metavariable_and_label_details() -> Non
         validate_match_document(inconsistent_context, record_number=1)
 
     invalid_meta_text = canonical_match()
-    invalid_meta_text["metaVariables"]["single"] = {"A": {"text": 1, "range": source_range("1")}}
+    json_object_member(invalid_meta_text, "metaVariables")["single"] = {"A": {"text": 1, "range": source_range("1")}}
     with pytest.raises(RuntimeError, match=r"single\.A\.text"):
         validate_match_document(invalid_meta_text, record_number=1)
 
     invalid_transform = canonical_match()
-    invalid_transform["metaVariables"]["transformed"] = {"A": 1}
+    json_object_member(invalid_transform, "metaVariables")["transformed"] = {"A": 1}
     with pytest.raises(RuntimeError, match="transformed metavariables"):
         validate_match_document(invalid_transform, record_number=1)
 
     invalid_label_text = canonical_match()
-    invalid_label_text["labels"][0]["text"] = None
+    first_json_object(invalid_label_text["labels"])["text"] = None
     with pytest.raises(RuntimeError, match=r"labels\[0\].text"):
         validate_match_document(invalid_label_text, record_number=1)
 
     invalid_label_style = canonical_match()
-    invalid_label_style["labels"][0]["style"] = "tertiary"
+    first_json_object(invalid_label_style["labels"])["style"] = "tertiary"
     with pytest.raises(RuntimeError, match=r"labels\[0\].style"):
         validate_match_document(invalid_label_style, record_number=1)
 
     invalid_label_message = canonical_match()
-    invalid_label_message["labels"][0]["message"] = 1
+    first_json_object(invalid_label_message["labels"])["message"] = 1
     with pytest.raises(RuntimeError, match=r"labels\[0\].message"):
         validate_match_document(invalid_label_message, record_number=1)
 
     outside_label = canonical_match()
-    outside_label["labels"][0] = {
+    labels = json_list(outside_label["labels"])
+    labels[0] = {
         "text": "x",
         "range": source_range("x", start_offset=20, start_column=20),
         "style": "secondary",
     }
+    outside_label["labels"] = labels
     validate_match_document(outside_label, record_number=1)
 
     without_rule_fields = canonical_match()
@@ -2206,18 +2431,22 @@ def test_match_validator_rejects_invalid_metavariable_and_label_details() -> Non
 
 def test_match_validator_rejects_reversed_positions_and_inconsistent_utf8() -> None:
     reversed_position = canonical_match()
-    reversed_position["range"]["end"] = {"line": 0, "column": 0}
-    reversed_position["range"]["start"] = {"line": 1, "column": 0}
+    reversed_range = json_object_member(reversed_position, "range")
+    reversed_range["end"] = {"line": 0, "column": 0}
+    reversed_range["start"] = {"line": 1, "column": 0}
     with pytest.raises(RuntimeError, match="reversed half-open positions"):
         validate_match_document(reversed_position, record_number=1)
 
     inconsistent = canonical_match(text="é")
-    inconsistent["range"]["byteOffset"]["end"] = 1
+    inconsistent_range = json_object_member(inconsistent, "range")
+    json_object_member(inconsistent_range, "byteOffset")["end"] = 1
     with pytest.raises(RuntimeError, match="inconsistent UTF-8 byte offsets"):
         validate_match_document(inconsistent, record_number=1)
 
     outside = canonical_match()
-    outside["metaVariables"]["single"] = {"A": {"text": "x", "range": source_range("x", start_offset=20, start_column=20)}}
+    json_object_member(outside, "metaVariables")["single"] = {
+        "A": {"text": "x", "range": source_range("x", start_offset=20, start_column=20)}
+    }
     validate_match_document(outside, record_number=1)
 
 
@@ -2230,7 +2459,7 @@ def test_match_validator_rejects_reversed_positions_and_inconsistent_utf8() -> N
         pytest.param({"replacement": "new", "replacementOffsets": {"start": 2, "end": 1}}, id="reversed"),
     ],
 )
-def test_match_validator_rejects_invalid_replacement_pairs(mutation: dict[str, Any]) -> None:
+def test_match_validator_rejects_invalid_replacement_pairs(mutation: JsonObject) -> None:
     match = canonical_match()
     match.update(mutation)
     with pytest.raises(RuntimeError, match="replacement"):
@@ -2280,7 +2509,7 @@ def test_find_code_builds_contextual_selector_strictness_and_preview_only_deleti
 def test_find_code_rejects_invalid_new_options(
     tmp_path: Path,
     selector: str | None,
-    strictness: Any,
+    strictness: object,
     rewrite: str | None,
     message: str,
 ) -> None:
@@ -2288,7 +2517,8 @@ def test_find_code_rejects_invalid_new_options(
     source.write_text("print(1)\n", encoding="utf-8")
     service = AstGrepService(make_runtime(tmp_path), runner=RecordingRunner())
     with pytest.raises(ValueError, match=message):
-        service.find_code(
+        invoke_boundary(
+            service.find_code,
             project_folder=str(tmp_path),
             pattern="print($A)",
             language="python",
@@ -2335,15 +2565,16 @@ def test_outline_forwards_items_symbol_types_and_public_member_filter(tmp_path: 
 )
 def test_outline_rejects_invalid_modes_and_symbol_types(
     tmp_path: Path,
-    items: Any,
-    symbol_types: Any,
+    items: object,
+    symbol_types: object,
     message: str,
 ) -> None:
     source = tmp_path / "sample.py"
     source.write_text("pass\n", encoding="utf-8")
     service = AstGrepService(make_runtime(tmp_path), outline_runner=RecordingOutlineRunner([]))
     with pytest.raises(ValueError, match=message):
-        service.outline_code(
+        invoke_boundary(
+            service.outline_code,
             project_folder=str(tmp_path),
             paths=["sample.py"],
             language=None,
@@ -2381,12 +2612,21 @@ def test_configured_scan_uses_private_config_exact_escaped_ids_and_metadata(tmp_
     assert command[-2:] == ["--", "sample.py"]
 
 
-@pytest.mark.parametrize("rule_ids", [[], ["unknown"], [""], [1]])
-def test_configured_scan_rejects_invalid_rule_id_filters(tmp_path: Path, rule_ids: Any) -> None:
+@pytest.mark.parametrize(
+    "rule_ids",
+    [
+        pytest.param([], id="empty"),
+        pytest.param(["unknown"], id="unknown"),
+        pytest.param([""], id="empty-id"),
+        pytest.param([1], id="non-string"),
+    ],
+)
+def test_configured_scan_rejects_invalid_rule_id_filters(tmp_path: Path, rule_ids: object) -> None:
     snapshot = fake_config_snapshot(tmp_path)
     service = AstGrepService(replace(make_runtime(tmp_path), config_snapshot=snapshot), runner=RecordingRunner())
     with pytest.raises(ValueError, match=r"rule_ids|configured rule id"):
-        service.scan_project_rules(
+        invoke_boundary(
+            service.scan_project_rules,
             project_folder=str(tmp_path),
             rule_ids=rule_ids,
             paths=None,
@@ -2460,11 +2700,20 @@ def test_configured_capabilities_are_required_and_exposed_in_server_info(tmp_pat
     info = AstGrepService(replace(runtime, config_snapshot=snapshot)).get_server_info()
     assert info["configuration_digest"] == "a" * 64
     assert info["configuration_provenance"] == snapshot.provenance
-    assert info["capabilities"] == snapshot.capabilities
+    assert info["capabilities"] == {
+        **snapshot.capabilities,
+        "javascript_module_inspection": False,
+        "semantic_analysis": False,
+        "typescript_project_inspection": False,
+        "postgresql_parser": False,
+        "typescript_execution": False,
+    }
     assert info["coordinate_conventions"]["range"] == "half-open [start,end)"
+    assert info["coordinate_conventions"]["oxc_offset"] == "zero-based UTF-16 code units"
     assert info["resource_limits"]["snippet_input_bytes"] == MAX_SNIPPET_INPUT_BYTES
     assert info["resource_limits"]["structured_output_bytes"] == MAX_STRUCTURED_OUTPUT_BYTES
     assert info["resource_limits"]["native_library_bytes"] == MAX_NATIVE_LIBRARY_BYTES
+    assert info["resource_limits"]["oxc_files"] == MAX_OUTLINE_PATHS
     assert info["resource_limits"]["windows_create_process_characters"] == WINDOWS_CREATE_PROCESS_LIMIT
     assert info["resource_limits"]["posix_arg_headroom_bytes"] == POSIX_ARG_HEADROOM_BYTES
     assert info["resource_limits"]["process_termination_grace_seconds"] == PROCESS_TERMINATION_GRACE_SECONDS
@@ -2475,7 +2724,9 @@ def test_argument_parser_accepts_repeated_trusted_native_libraries(monkeypatch: 
         sys,
         "argv",
         [
-            "ast-grep-server",
+            "ast-soleaux",
+            "--oxc-helper",
+            "ast-soleaux-oxc.mjs",
             "--trusted-native-library",
             "one.dylib",
             "a" * 64,
@@ -2485,6 +2736,7 @@ def test_argument_parser_accepts_repeated_trusted_native_libraries(monkeypatch: 
         ],
     )
     args = build_argument_parser().parse_args()
+    assert args.oxc_helper == "ast-soleaux-oxc.mjs"
     assert args.trusted_native_library == [["one.dylib", "a" * 64], ["two.so", "b" * 64]]
 
 
@@ -2492,7 +2744,7 @@ def test_match_text_format_includes_rule_preview_offsets_and_transformations() -
     match = canonical_match(file="src/example.py")
     match["replacement"] = ""
     match["replacementOffsets"] = {"start": 0, "end": 8}
-    match["metaVariables"]["transformed"] = {"NORMALIZED": "one"}
+    json_object_member(match, "metaVariables")["transformed"] = {"NORMALIZED": "one"}
     match["fix"] = {"template": "$NORMALIZED"}
     match["transform"] = {"NORMALIZED": "converted"}
     match["rewriters"] = [{"id": "convert"}]
@@ -2504,3 +2756,221 @@ def test_match_text_format_includes_rule_preview_offsets_and_transformations() -
     assert 'Replacement offsets: {"start":0,"end":8}' in formatted
     assert 'Transformed metavariables: {"NORMALIZED":"one"}' in formatted
     assert "rewriters:" in formatted
+
+
+def test_search_cursor_pages_and_rejects_query_mismatch() -> None:
+    store = ResultCursorStore()
+    matches = [json_object({"file": f"src/{index}.py"}) for index in range(3)]
+
+    first = store.first_search_page(
+        query_digest="query-a",
+        matches=matches,
+        page_size=1,
+        source_truncated=False,
+    )
+
+    cursor = first.get("next_cursor")
+    assert isinstance(cursor, str)
+    assert first["matches"] == [{"file": "src/0.py"}]
+    with pytest.raises(ValueError, match="does not match"):
+        store.next_search_page(cursor=cursor, query_digest="query-b", page_size=1)
+
+    second = store.next_search_page(cursor=cursor, query_digest="query-a", page_size=1)
+    third = store.next_search_page(cursor=cursor, query_digest="query-a", page_size=1)
+    assert second["matches"] == [{"file": "src/1.py"}]
+    assert second.get("next_cursor") == cursor
+    assert third["matches"] == [{"file": "src/2.py"}]
+    assert third.get("next_cursor") is None
+    with pytest.raises(ValueError, match="invalid or expired"):
+        store.next_search_page(cursor=cursor, query_digest="query-a", page_size=1)
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_fastmcp_catalog_hides_project_rule_tools(tmp_path: Path) -> None:
+    runtime = make_runtime(tmp_path)
+
+    tool_names = {tool.name for tool in await create_mcp(runtime).list_tools()}
+
+    assert tool_names == {
+        "dump_syntax_tree",
+        "test_match_code_rule",
+        "outline_code",
+        "find_code",
+        "find_code_by_rule",
+        "get_server_info",
+    }
+
+
+@pytest.mark.asyncio
+async def test_oxc_configured_fastmcp_catalog_exposes_module_inspection(tmp_path: Path) -> None:
+    runtime = make_runtime(tmp_path, with_oxc=True)
+
+    tool_names = {tool.name for tool in await create_mcp(runtime).list_tools()}
+
+    assert "oxc_modules" in tool_names
+
+
+def test_oxc_module_inspection_normalizes_contained_paths_and_request(tmp_path: Path) -> None:
+    source = tmp_path / "src" / "entry.ts"
+    dependency = tmp_path / "src" / "dep.js"
+    package_json = tmp_path / "package.json"
+    source.parent.mkdir()
+    source.write_text('import { value } from "./dep.js";\n', encoding="utf-8")
+    dependency.write_text("export const value = 1;\n", encoding="utf-8")
+    package_json.write_text('{"type":"module"}\n', encoding="utf-8")
+    response = {
+        "versions": {
+            "helper": SUPPORTED_OXC_HELPER_VERSION,
+            "parser": SUPPORTED_OXC_PARSER_VERSION,
+            "resolver": SUPPORTED_OXC_RESOLVER_VERSION,
+        },
+        "graph_version": 1,
+        "graph": {"version": 1, "nodes": [], "edges": []},
+        "cache_hit": False,
+        "modules": [
+            {
+                "file": "src/entry.ts",
+                "has_module_syntax": True,
+                "source_type": "module",
+                "package": None,
+                "commonjs_exports": [],
+                "import_meta_spans": [],
+                "edges": [
+                    {
+                        "kind": "import",
+                        "module_system": "esm",
+                        "specifier": "./dep.js",
+                        "expression": None,
+                        "start": 22,
+                        "end": 32,
+                        "resolution": "resolved",
+                        "resolved_path": str(dependency),
+                        "package_json_path": str(package_json),
+                        "module_type": "module",
+                        "resolution_error": None,
+                    }
+                ],
+                "diagnostics": [],
+            }
+        ],
+    }
+    runner = RecordingRunner(stdout=json.dumps(response))
+    runtime = make_runtime(tmp_path, with_oxc=True)
+    service = AstGrepService(runtime, runner=runner)
+
+    modules = service.inspect_oxc_modules(
+        project_folder=str(tmp_path),
+        paths=["src/entry.ts"],
+        include_globs=None,
+        exclude_globs=None,
+        strict_paths=True,
+        include_dynamic=True,
+    )
+
+    assert modules[0]["edges"][0]["resolved_path"] == "src/dep.js"
+    assert modules[0]["edges"][0]["package_json_path"] == "package.json"
+    command, kwargs = runner.calls[0]
+    assert command[-1].endswith("ast-soleaux-oxc.mjs")
+    input_text = kwargs["input"]
+    assert isinstance(input_text, str)
+    assert json.loads(input_text) == {
+        "project_root": str(tmp_path),
+        "files": ["src/entry.ts"],
+        "include_dynamic": True,
+    }
+
+
+def test_oxc_module_inspection_rejects_sidecar_paths_outside_project(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    source = project / "entry.ts"
+    outside = tmp_path / "outside.js"
+    project.mkdir()
+    source.write_text('import "../outside.js";\n', encoding="utf-8")
+    outside.write_text("export {};\n", encoding="utf-8")
+    response = {
+        "versions": {
+            "helper": SUPPORTED_OXC_HELPER_VERSION,
+            "parser": SUPPORTED_OXC_PARSER_VERSION,
+            "resolver": SUPPORTED_OXC_RESOLVER_VERSION,
+        },
+        "graph_version": 1,
+        "graph": {"version": 1, "nodes": [], "edges": []},
+        "cache_hit": False,
+        "modules": [
+            {
+                "file": "entry.ts",
+                "has_module_syntax": True,
+                "source_type": "module",
+                "package": None,
+                "commonjs_exports": [],
+                "import_meta_spans": [],
+                "edges": [
+                    {
+                        "kind": "import",
+                        "module_system": "esm",
+                        "specifier": "../outside.js",
+                        "expression": None,
+                        "start": 7,
+                        "end": 20,
+                        "resolution": "resolved",
+                        "resolved_path": str(outside),
+                        "package_json_path": None,
+                        "module_type": None,
+                        "resolution_error": None,
+                    }
+                ],
+                "diagnostics": [],
+            }
+        ],
+    }
+    service = AstGrepService(make_runtime(project, with_oxc=True), runner=RecordingRunner(stdout=json.dumps(response)))
+
+    with pytest.raises(RuntimeError, match="outside project_folder"):
+        service.inspect_oxc_modules(
+            project_folder=str(project),
+            paths=["entry.ts"],
+            include_globs=None,
+            exclude_globs=None,
+            strict_paths=True,
+            include_dynamic=False,
+        )
+
+
+def test_relative_project_uses_single_allowed_root(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    source = project / "example.py"
+    source.parent.mkdir()
+    source.write_text("print('value')\n", encoding="utf-8")
+    server_directory = tmp_path / "server"
+    server_directory.mkdir()
+    runtime = replace(make_runtime(tmp_path), working_directory=server_directory)
+    service = AstGrepService(runtime, runner=RecordingRunner())
+
+    result = service.find_code(
+        project_folder="project",
+        pattern="print($A)",
+        language="python",
+        paths=["example.py"],
+        include_globs=None,
+        exclude_globs=None,
+        max_results=1,
+    )
+
+    assert result["returned"] == 0
+
+
+def test_duplicate_project_path_error_includes_effective_path(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = AstGrepService(make_runtime(tmp_path), runner=RecordingRunner())
+
+    with pytest.raises(ValueError, match="Remove the repeated project prefix"):
+        service.find_code(
+            project_folder="project",
+            pattern="print($A)",
+            language="python",
+            paths=["project/example.py"],
+            include_globs=None,
+            exclude_globs=None,
+            max_results=1,
+        )
