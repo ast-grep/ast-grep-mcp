@@ -319,6 +319,38 @@ class TestRunCommand:
         with pytest.raises(RuntimeError, match="not found"):
             run_command(["nonexistent"])
 
+    @patch("subprocess.run")
+    def test_command_prefix_is_expanded(self, mock_run):
+        """Test wrapper commands are expanded into separate arguments."""
+        mock_result = Mock(returncode=0, stdout="output")
+        mock_run.return_value = mock_result
+
+        run_command(["uv run ast-grep", "run", "--pattern", "test"])
+
+        mock_run.assert_called_once_with(
+            ["uv", "run", "ast-grep", "run", "--pattern", "test"],
+            capture_output=True,
+            input=None,
+            text=True,
+            check=False,
+            shell=False,
+        )
+
+    @patch("subprocess.run")
+    def test_quoted_executable_path_is_preserved(self, mock_run):
+        """Test executable paths containing spaces can be quoted."""
+        mock_result = Mock(returncode=0, stdout="output")
+        mock_run.return_value = mock_result
+
+        run_command(['"/path with spaces/ast-grep"', "scan", "--json"])
+
+        assert mock_run.call_args.args[0] == ["/path with spaces/ast-grep", "scan", "--json"]
+
+    def test_invalid_command_prefix(self):
+        """Test malformed quoting produces a configuration error."""
+        with pytest.raises(RuntimeError, match="Invalid command in AST_GREP_PATH"):
+            run_command(['"unterminated', "scan"])
+
 
 class TestFormatMatchesAsText:
     """Test the format_matches_as_text helper function"""
@@ -426,6 +458,7 @@ class TestRunAstGrep:
 
     @patch("main.run_command")
     @patch("main.CONFIG_PATH", None)
+    @patch("main.AST_GREP_COMMAND", None)
     def test_without_config(self, mock_run):
         """Test running ast-grep without config"""
         mock_result = Mock()
@@ -438,6 +471,7 @@ class TestRunAstGrep:
 
     @patch("main.run_command")
     @patch("main.CONFIG_PATH", "/path/to/config.yaml")
+    @patch("main.AST_GREP_COMMAND", None)
     def test_with_config(self, mock_run):
         """Test running ast-grep with config"""
         mock_result = Mock()
@@ -457,6 +491,54 @@ class TestRunAstGrep:
             ],
             None,
         )
+
+    @patch("main.run_command")
+    @patch("main.CONFIG_PATH", None)
+    @patch("main.AST_GREP_COMMAND", "uv run ast-grep")
+    def test_with_custom_command(self, mock_run):
+        """Test running ast-grep through a configured wrapper command."""
+        mock_result = Mock()
+        mock_run.return_value = mock_result
+
+        result = run_ast_grep("run", ["--pattern", "test"])
+
+        assert result == mock_result
+        mock_run.assert_called_once_with(["uv run ast-grep", "run", "--pattern", "test"], None)
+
+    @patch("main.run_command")
+    @patch("main.CONFIG_PATH", "/path/to/config.yaml")
+    @patch("main.AST_GREP_COMMAND", "/custom/path/to/ast-grep")
+    def test_with_config_and_custom_command(self, mock_run):
+        """Test custom command and ast-grep configuration together."""
+        mock_result = Mock()
+        mock_run.return_value = mock_result
+
+        result = run_ast_grep("scan", ["--inline-rules", "rule"])
+
+        assert result == mock_result
+        mock_run.assert_called_once_with(
+            [
+                "/custom/path/to/ast-grep",
+                "scan",
+                "--config",
+                "/path/to/config.yaml",
+                "--inline-rules",
+                "rule",
+            ],
+            None,
+        )
+
+
+class TestParseArgsAndGetConfig:
+    """Test command-line and environment configuration."""
+
+    @patch.object(sys, "argv", ["ast-grep-server"])
+    @patch.dict(os.environ, {"AST_GREP_PATH": "uv run ast-grep"})
+    @patch("main.AST_GREP_COMMAND", None)
+    def test_ast_grep_path_from_environment(self):
+        main.parse_args_and_get_config()
+
+        assert main.AST_GREP_COMMAND == "uv run ast-grep"
 
 
 class TestRunMCPServer:

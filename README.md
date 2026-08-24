@@ -100,6 +100,33 @@ You can provide the config file in two ways (in order of precedence):
 1. **Command-line argument**: `--config /path/to/sgconfig.yaml`
 2. **Environment variable**: `AST_GREP_CONFIG=/path/to/sgconfig.yaml`
 
+### Custom ast-grep Command
+
+If `ast-grep` is not in `PATH`, or must be launched through another command, set
+`AST_GREP_PATH`. The value can be an executable path or a command prefix:
+
+```json
+{
+  "mcpServers": {
+    "ast-grep": {
+      "command": "uv",
+      "args": ["--directory", "/absolute/path/to/ast-grep-mcp", "run", "main.py"],
+      "env": {
+        "AST_GREP_PATH": "uv run ast-grep"
+      }
+    }
+  }
+}
+```
+
+Other examples:
+
+- `AST_GREP_PATH="/custom/path/to/ast-grep"`
+- `AST_GREP_PATH="npx ast-grep"`
+- `AST_GREP_PATH='"/path containing spaces/ast-grep"'`
+
+If unset, the command defaults to `ast-grep`.
+
 ## Usage
 
 This repository includes comprehensive ast-grep rule documentation in [ast-grep.mdc](https://github.com/ast-grep/ast-grep-mcp/blob/main/ast-grep.mdc). The documentation covers all aspects of writing effective ast-grep rules, from simple patterns to complex multi-condition searches.

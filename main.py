@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -39,11 +40,12 @@ _setup_signal_handlers()
 CONFIG_PATH = None
 TRANSPORT_TYPE = "stdio"
 SERVER_PORT = 8000
+AST_GREP_COMMAND = None
 
 
 def parse_args_and_get_config():
     """Parse command-line arguments and determine config path and transport."""
-    global CONFIG_PATH, TRANSPORT_TYPE, SERVER_PORT
+    global CONFIG_PATH, TRANSPORT_TYPE, SERVER_PORT, AST_GREP_COMMAND
 
     # Determine how the script was invoked
     prog = None
@@ -58,6 +60,7 @@ def parse_args_and_get_config():
         epilog="""
 environment variables:
   AST_GREP_CONFIG    Path to sgconfig.yaml file (overridden by --config flag)
+  AST_GREP_PATH      Command used to run ast-grep (for example, 'uv run ast-grep')
 
 For more information, see: https://github.com/ast-grep/ast-grep-mcp
         """,
@@ -91,6 +94,10 @@ For more information, see: https://github.com/ast-grep/ast-grep-mcp
             print(f"Error: Config file '{env_config}' specified in AST_GREP_CONFIG does not exist")
             sys.exit(1)
         CONFIG_PATH = env_config
+
+    # This may be either an executable path or a command prefix such as
+    # "uv run ast-grep". run_command expands it without invoking a shell.
+    AST_GREP_COMMAND = os.environ.get("AST_GREP_PATH", "ast-grep")
 
 
 # Initialize MCP server
@@ -352,10 +359,24 @@ def get_supported_languages() -> List[str]:
 
 def run_command(args: List[str], input_text: Optional[str] = None) -> subprocess.CompletedProcess:
     try:
+        # A configured executable can include a wrapper command, such as
+        # "uv run ast-grep". Parse only that command prefix so ast-grep's
+        # arguments remain separate from the configured command string.
+        command = shlex.split(args[0], posix=sys.platform != "win32")
+        if sys.platform == "win32":
+            # In non-POSIX mode shlex preserves wrapping quotes; subprocess
+            # expects the executable token itself without them.
+            command = [part[1:-1] if len(part) >= 2 and part[0] == part[-1] == '"' else part for part in command]
+        if not command:
+            raise RuntimeError("AST_GREP_PATH must not be empty")
+
+        is_ast_grep_run = len(args) >= 2 and args[1] == "run"
+        args = command + args[1:]
+
         # On Windows, if ast-grep is installed via npm, it's a batch file
         # that requires shell=True to execute properly
-        use_shell = sys.platform == "win32" and args[0] == "ast-grep"
-        need_check = len(args) < 2 or args[1] != "run"
+        use_shell = sys.platform == "win32" and command == ["ast-grep"]
+        need_check = not is_ast_grep_run
 
         result = subprocess.run(
             args,
@@ -394,12 +415,15 @@ def run_command(args: List[str], input_text: Optional[str] = None) -> subprocess
     except FileNotFoundError as e:
         error_msg = f"Command '{args[0]}' not found. Please ensure {args[0]} is installed and in PATH."
         raise RuntimeError(error_msg) from e
+    except ValueError as e:
+        raise RuntimeError(f"Invalid command in AST_GREP_PATH: {e}") from e
 
 
 def run_ast_grep(command: str, args: List[str], input_text: Optional[str] = None) -> subprocess.CompletedProcess:
     if CONFIG_PATH:
         args = ["--config", CONFIG_PATH] + args
-    return run_command(["ast-grep", command] + args, input_text)
+    ast_grep_command = AST_GREP_COMMAND or "ast-grep"
+    return run_command([ast_grep_command, command] + args, input_text)
 
 
 def run_mcp_server() -> None:
