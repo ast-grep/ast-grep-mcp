@@ -352,6 +352,139 @@ class TestRunCommand:
             run_command(['"unterminated', "scan"])
 
 
+class TestWindowsCommandResolution:
+    """Tests for the Windows shell=True fix (issue #32).
+
+    shell=True routes arguments through cmd.exe, which mangles $, (), &, |,
+    newlines, etc. in patterns and --inline-rules YAML. The resolver must
+    find the real binary so subprocess can run with shell=False.
+    """
+
+    def test_direct_exe_runs_without_shell(self):
+        """A directly-executable binary (cargo install) must not use a shell."""
+        with (
+            patch.object(sys, "platform", "win32"),
+            patch("main.shutil.which", return_value=r"C:\tools\ast-grep.exe"),
+        ):
+            argv, use_shell = main._resolve_windows_command(["ast-grep"])
+
+        assert use_shell is False
+        assert argv == [r"C:\tools\ast-grep.exe"]
+
+    def test_batch_sibling_exe_is_preferred(self, tmp_path):
+        """An npm .cmd wrapper with a sibling .exe resolves to the .exe."""
+        wrapper = tmp_path / "ast-grep.cmd"
+        wrapper.write_text("@echo off\n")
+        sibling = tmp_path / "ast-grep.exe"
+        sibling.write_text("fake")
+        with (
+            patch.object(sys, "platform", "win32"),
+            patch("main.shutil.which", return_value=str(wrapper)),
+        ):
+            argv, use_shell = main._resolve_windows_command(["ast-grep"])
+
+        assert use_shell is False
+        assert argv == [str(sibling)]
+
+    def test_batch_wrapper_parsed_for_delegate_exe(self, tmp_path):
+        """A .cmd delegating to a real binary is parsed (issue #32 option 1)."""
+        real_exe = tmp_path / "real" / "ast-grep.exe"
+        real_exe.parent.mkdir()
+        real_exe.write_text("fake")
+        wrapper = tmp_path / "ast-grep.cmd"
+        wrapper.write_text(f'@"{real_exe}" %*\n')
+        with (
+            patch.object(sys, "platform", "win32"),
+            patch("main.shutil.which", side_effect=[str(wrapper), None]),
+            patch("main.os.path.isfile", side_effect=lambda p: os.path.normcase(p) == os.path.normcase(str(real_exe))),
+        ):
+            argv, use_shell = main._resolve_windows_command(["ast-grep"])
+
+        assert use_shell is False
+        assert argv == [str(real_exe)]
+
+    def test_batch_wrapper_percent_dp0_expansion(self, tmp_path):
+        """%~dp0 in the wrapper resolves relative to the wrapper directory."""
+        target_dir = tmp_path / "node_modules" / "@ast-grep" / "cli"
+        target_dir.mkdir(parents=True)
+        real_exe = target_dir / "ast-grep.exe"
+        real_exe.write_text("fake")
+        wrapper = tmp_path / "ast-grep.cmd"
+        wrapper.write_text('@"%~dp0\\node_modules\\@ast-grep\\cli\\ast-grep.exe" %*\n')
+        parsed = main._parse_windows_batch_wrapper(str(wrapper))
+
+        assert parsed == [str(real_exe)]
+
+    def test_npm_layout_search_finds_platform_binary(self, tmp_path):
+        """Global/local npm layouts are searched for the platform binary."""
+        candidate = tmp_path / "node_modules" / "@ast-grep" / "cli" / "ast-grep.exe"
+        candidate.parent.mkdir(parents=True)
+        candidate.write_text("fake")
+
+        found = main._search_npm_layout_for_ast_grep_exe(str(tmp_path / "node_modules" / ".bin"))
+
+        assert found == str(candidate)
+
+    def test_unresolvable_wrapper_falls_back_to_shell(self, tmp_path):
+        """Legacy shell=True is kept only when no binary can be resolved."""
+        wrapper = tmp_path / "ast-grep.cmd"
+        wrapper.write_text("@echo off\n")
+        with (
+            patch.object(sys, "platform", "win32"),
+            patch("main.shutil.which", side_effect=[str(wrapper), None, None]),
+            patch("main.os.path.isfile", return_value=False),
+            patch("main._parse_windows_batch_wrapper", return_value=None),
+            patch("main._search_npm_layout_for_ast_grep_exe", return_value=None),
+        ):
+            argv, use_shell = main._resolve_windows_command(["ast-grep"])
+
+        assert use_shell is True
+        assert argv == ["ast-grep"]
+
+    def test_multi_token_wrapper_never_uses_shell(self):
+        """Wrapper commands like 'uv run ast-grep' already avoid the shell."""
+        argv, use_shell = main._resolve_windows_command(["uv", "run", "ast-grep"])
+
+        assert use_shell is False
+        assert argv == ["uv", "run", "ast-grep"]
+
+    @patch("subprocess.run")
+    def test_run_command_avoids_shell_on_windows(self, mock_run):
+        """run_command must invoke the resolved binary with shell=False."""
+        mock_run.return_value = Mock(returncode=0, stdout="output")
+        yaml_rule = "id: test\nlanguage: tsx\nrule:\n  pattern: useState($V)"
+        with (
+            patch.object(sys, "platform", "win32"),
+            patch("main.shutil.which", return_value=r"C:\tools\ast-grep.exe"),
+        ):
+            run_command(["ast-grep", "scan", "--inline-rules", yaml_rule, "--json", "--stdin"], input_text="code")
+
+        called_argv = mock_run.call_args.args[0]
+        assert mock_run.call_args.kwargs["shell"] is False
+        # The raw YAML (newlines, $, parens) must reach ast-grep untouched,
+        # not mangled by cmd.exe.
+        assert "--inline-rules" in called_argv
+        assert called_argv[called_argv.index("--inline-rules") + 1] == yaml_rule
+
+    @patch("subprocess.run")
+    def test_run_command_resolves_cmd_wrapper_to_exe(self, mock_run, tmp_path):
+        """A .cmd wrapper must be replaced by its delegate .exe end to end."""
+        mock_run.return_value = Mock(returncode=0, stdout="output")
+        real_exe = tmp_path / "ast-grep.exe"
+        real_exe.write_text("fake")
+        wrapper = tmp_path / "ast-grep.cmd"
+        wrapper.write_text(f'@"{real_exe}" %*\n')
+        with (
+            patch.object(sys, "platform", "win32"),
+            patch("main.shutil.which", side_effect=[str(wrapper), None]),
+        ):
+            run_command(["ast-grep", "scan", "--json", "some/dir"])
+
+        called_argv = mock_run.call_args.args[0]
+        assert mock_run.call_args.kwargs["shell"] is False
+        assert called_argv[0] == str(real_exe)
+
+
 class TestFormatMatchesAsText:
     """Test the format_matches_as_text helper function"""
 
