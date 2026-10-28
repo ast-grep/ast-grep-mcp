@@ -1,7 +1,9 @@
 import argparse
 import json
 import os
+import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -357,6 +359,213 @@ def get_supported_languages() -> List[str]:
     return sorted(set(languages))
 
 
+_WINDOWS_BATCH_EXTENSIONS = (".cmd", ".bat", ".ps1")
+
+
+def _parse_windows_batch_wrapper(wrapper_path: str) -> Optional[List[str]]:
+    """Parse an npm-style .cmd/.bat wrapper to find the underlying target.
+
+    Returns an argv prefix that can be executed directly with shell=False,
+    bypassing cmd.exe argument mangling. Returns None if no target found.
+    """
+    try:
+        with open(wrapper_path, "r", errors="replace") as f:
+            content = f.read(32768)
+    except (OSError, UnicodeError):
+        return None
+    wrapper_dir = os.path.dirname(os.path.abspath(wrapper_path))
+
+    def _resolve_candidate(raw: str) -> Optional[str]:
+        raw = raw.strip().lstrip("@").strip().strip('"').strip("'")
+        if not raw:
+            return None
+        # Expand npm cmd.exe variables: %~dp0 -> wrapper dir, %dp0% variants.
+        # Use a function replacement so Windows backslashes in the path are
+        # not interpreted as regex escapes.
+        sep_dir = wrapper_dir + os.sep
+        raw = re.sub(r"%~dp0", lambda _: sep_dir, raw, flags=re.IGNORECASE)
+        raw = re.sub(r"%dp0%", lambda _: sep_dir, raw, flags=re.IGNORECASE)
+        raw = os.path.expandvars(raw)
+        candidates = [raw]
+        if not os.path.isabs(raw):
+            candidates.append(os.path.join(wrapper_dir, raw))
+            candidates.append(os.path.normpath(os.path.join(wrapper_dir, raw)))
+        for cand in candidates:
+            # Strip trailing cmd.exe `%*` forwarding or arguments
+            cand = cand.split("%*")[0].strip().strip('"')
+            if cand and os.path.isfile(cand):
+                return os.path.normpath(cand)
+        return None
+
+    # 1. Look for a referenced ast-grep .exe (binary npm delegate, see issue #32)
+    for match in re.finditer(r'"?([^\s"\']*?ast-grep[^"\']*?\.exe)"?', content, re.IGNORECASE):
+        resolved = _resolve_candidate(match.group(1))
+        if resolved and resolved.lower().endswith(".exe"):
+            return [resolved]
+
+    # 2. Look for any referenced .exe and prefer ones mentioning ast-grep/node_modules
+    exe_refs: List[str] = []
+    for match in re.finditer(r'"?((?:[A-Za-z]:)?[^\s"\']*?\.exe)"?', content, re.IGNORECASE):
+        resolved = _resolve_candidate(match.group(1))
+        if resolved:
+            exe_refs.append(resolved)
+    for ref in exe_refs:
+        lowered = ref.lower()
+        if "ast-grep" in lowered or "node_modules" in lowered:
+            return [ref]
+    # 3. npm JS wrapper: node.exe + script.js (e.g. @ast-grep/cli bin script).
+    # Run node directly so arguments bypass cmd.exe entirely.
+    node_ref: Optional[str] = None
+    js_ref: Optional[str] = None
+    for match in re.finditer(r'"?((?:[A-Za-z]:)?[^\s"\']*?node(?:\.exe)?)"?', content, re.IGNORECASE):
+        resolved = _resolve_candidate(match.group(1))
+        if resolved:
+            node_ref = resolved
+            break
+    for match in re.finditer(r'"?([^\s"\']*?\.js)"?', content):
+        resolved = _resolve_candidate(match.group(1))
+        if resolved and os.path.isfile(resolved):
+            js_ref = resolved
+            break
+    if node_ref and js_ref:
+        return [node_ref, js_ref]
+    if exe_refs:
+        return [exe_refs[0]]
+    return None
+
+
+def _search_npm_layout_for_ast_grep_exe(wrapper_dir: str) -> Optional[str]:
+    """Search common npm layouts for the real ast-grep binary.
+
+    Covers global installs (<prefix>/node_modules/@ast-grep/...) and local
+    installs (<project>/node_modules/.bin -> ../@ast-grep/...), including the
+    per-platform optional packages (e.g. @ast-grep/cli-win32-x64-msvc).
+    """
+    search_roots = [wrapper_dir]
+    current = os.path.abspath(wrapper_dir)
+    for _ in range(5):
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        search_roots.append(parent)
+        # node_modules sits alongside .bin or the prefix root
+        search_roots.append(os.path.join(parent, "node_modules"))
+        current = parent
+
+    relative_candidates = [
+        os.path.join("@ast-grep", "cli", "ast-grep.exe"),
+        os.path.join("@ast-grep", "cli", "bin", "ast-grep.exe"),
+        os.path.join("@ast-grep", "cli-win32-x64-msvc", "ast-grep.exe"),
+        os.path.join("@ast-grep", "cli-win32-ia32-msvc", "ast-grep.exe"),
+        os.path.join("@ast-grep", "cli-win32-arm64-msvc", "ast-grep.exe"),
+    ]
+    for root in search_roots:
+        base = root
+        # If root already ends with node_modules, look directly inside it
+        if os.path.basename(base).lower() != "node_modules":
+            base = os.path.join(root, "node_modules")
+        for rel in relative_candidates:
+            candidate = os.path.join(base, rel)
+            if os.path.isfile(candidate):
+                return candidate
+        # Generic fallback: any ast-grep*.exe directly under @ast-grep packages
+        ast_grep_dir = os.path.join(base, "@ast-grep")
+        if os.path.isdir(ast_grep_dir):
+            try:
+                for package in os.listdir(ast_grep_dir):
+                    package_dir = os.path.join(ast_grep_dir, package)
+                    if not os.path.isdir(package_dir):
+                        continue
+                    for entry in os.listdir(package_dir):
+                        if entry.lower().startswith("ast-grep") and entry.lower().endswith(".exe"):
+                            candidate = os.path.join(package_dir, entry)
+                            if os.path.isfile(candidate):
+                                return candidate
+            except OSError:
+                continue
+    return None
+
+
+def _resolve_windows_command(command: List[str]) -> tuple[List[str], bool]:
+    """Resolve a Windows command to avoid shell=True (issue #32).
+
+    shell=True routes arguments through cmd.exe, which mangles metacharacters
+    ($, parens, &, |, newlines, ...) in patterns and --inline-rules YAML,
+    causing exit code 8 failures. Whenever possible, resolve the real binary
+    and run it directly with shell=False.
+
+    Returns (argv_prefix, use_shell).
+    """
+    if not command:
+        return command, False
+    executable = command[0]
+    rest = command[1:]
+
+    # Multi-token wrapper commands (e.g. "uv run ast-grep") already run
+    # without a shell; only the executable token could need resolution and
+    # those wrappers are real executables, so leave them alone.
+    if len(command) > 1:
+        return command, False
+
+    # Bare `ast-grep` (or an explicit path): find what it actually points to.
+    resolved_path: Optional[str] = None
+    if os.path.sep in executable or "/" in executable:
+        if os.path.isfile(executable):
+            resolved_path = executable
+        elif os.path.isfile(executable + ".exe"):
+            resolved_path = executable + ".exe"
+    else:
+        try:
+            resolved_path = shutil.which(executable)
+        except Exception:
+            resolved_path = None
+        if resolved_path is None:
+            # An .exe may exist on PATH even when the .cmd shadows the name
+            try:
+                resolved_path = shutil.which(executable + ".exe")
+            except Exception:
+                resolved_path = None
+
+    if resolved_path is None:
+        # Keep legacy behavior (shell=True only for bare `ast-grep`, as
+        # before) so a missing binary still surfaces the familiar "not
+        # found" error path instead of a new failure mode.
+        return command, command == ["ast-grep"]
+
+    if not resolved_path.lower().endswith(_WINDOWS_BATCH_EXTENSIONS):
+        # Already a directly-executable file (cargo install, pipx, etc.).
+        # Run without a shell so cmd.exe cannot mangle our arguments.
+        return [resolved_path] + rest, False
+
+    # Batch wrapper (npm install): prefer a sibling .exe first.
+    sibling_exe = os.path.splitext(resolved_path)[0] + ".exe"
+    if os.path.isfile(sibling_exe):
+        return [sibling_exe] + rest, False
+
+    # An explicitly-named .exe elsewhere on PATH.
+    try:
+        exe_on_path = shutil.which(os.path.splitext(os.path.basename(resolved_path))[0] + ".exe")
+    except Exception:
+        exe_on_path = None
+    if exe_on_path and os.path.isfile(exe_on_path) and not exe_on_path.lower().endswith(_WINDOWS_BATCH_EXTENSIONS):
+        return [exe_on_path] + rest, False
+
+    # Parse the wrapper for its underlying target (binary or node+js).
+    parsed = _parse_windows_batch_wrapper(resolved_path)
+    if parsed:
+        return parsed + rest, False
+
+    # Search common npm layouts for the platform binary.
+    found = _search_npm_layout_for_ast_grep_exe(os.path.dirname(resolved_path))
+    if found:
+        return [found] + rest, False
+
+    # Last resort: legacy shell=True behavior for bare `ast-grep` (works for
+    # simple patterns, still broken for metacharacters, but better than
+    # failing to launch). Other commands keep shell=False as before.
+    return command, command == ["ast-grep"]
+
+
 def run_command(args: List[str], input_text: Optional[str] = None) -> subprocess.CompletedProcess:
     try:
         # A configured executable can include a wrapper command, such as
@@ -371,11 +580,12 @@ def run_command(args: List[str], input_text: Optional[str] = None) -> subprocess
             raise RuntimeError("AST_GREP_PATH must not be empty")
 
         is_ast_grep_run = len(args) >= 2 and args[1] == "run"
-        args = command + args[1:]
 
-        # On Windows, if ast-grep is installed via npm, it's a batch file
-        # that requires shell=True to execute properly
-        use_shell = sys.platform == "win32" and command == ["ast-grep"]
+        if sys.platform == "win32":
+            command, use_shell = _resolve_windows_command(command)
+        else:
+            use_shell = False
+        args = command + args[1:]
         need_check = not is_ast_grep_run
 
         result = subprocess.run(
