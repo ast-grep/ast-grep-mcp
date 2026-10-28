@@ -301,7 +301,25 @@ class TestRunCommand:
         result = run_command(["echo", "test"])
 
         assert result.stdout == "output"
-        mock_run.assert_called_once_with(["echo", "test"], capture_output=True, input=None, text=True, check=True, shell=False)
+        mock_run.assert_called_once_with(
+            ["echo", "test"],
+            capture_output=True,
+            input=None,
+            text=True,
+            encoding="utf-8",
+            check=True,
+            shell=False,
+        )
+
+    def test_decodes_utf8_output_independent_of_locale(self):
+        """ast-grep output is UTF-8 even when the process locale is not."""
+        python_command = f'"{sys.executable}"' if sys.platform == "win32" else sys.executable
+        script = "import sys; sys.stdout.buffer.write('match ┐'.encode('utf-8'))"
+
+        with patch("locale.getencoding", return_value="cp936"):
+            result = run_command([python_command, "-c", script])
+
+        assert result.stdout == "match ┐"
 
     @patch("subprocess.run")
     def test_command_failure(self, mock_run):
@@ -332,6 +350,7 @@ class TestRunCommand:
             capture_output=True,
             input=None,
             text=True,
+            encoding="utf-8",
             check=False,
             shell=False,
         )
