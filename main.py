@@ -383,6 +383,7 @@ def run_command(args: List[str], input_text: Optional[str] = None) -> subprocess
             capture_output=True,
             input=input_text,
             text=True,
+            encoding="utf-8",  # ast-grep emits UTF-8 regardless of the host locale
             check=need_check,  # Don't raise on non-zero exit code, handle it manually
             shell=use_shell,
         )
